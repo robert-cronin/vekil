@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	policyFactGenerationVersion     = "coding-agent-facts-v1"
+	policyFactGenerationVersion     = "coding-agent-facts-v2"
 	policyFunctionGenerationVersion = "emit-policy-signals-v1"
-	policyPromptGenerationVersion   = "coding-agent-classifier-prompt-v2"
-	policyMapperGenerationVersion   = "coding-agent-mapper-v1"
+	policyPromptGenerationVersion   = "coding-agent-classifier-prompt-v3"
+	policyMapperGenerationVersion   = "coding-agent-mapper-v2"
 )
 
 func policyConfigGeneration(cfg ProvidersConfig) string {
@@ -69,7 +69,7 @@ func policyProfileRouteGenerationValue(route *modelRoute, fallbackID string) pol
 	return value
 }
 
-func policyClassifierGeneration(route *modelRoute) string {
+func policyClassifierGeneration(route *modelRoute, reasoningEffort string) string {
 	var target struct {
 		ID            string `json:"id"`
 		Provider      string `json:"provider"`
@@ -87,13 +87,14 @@ func policyClassifierGeneration(route *modelRoute) string {
 		}
 	}
 	return policyHashValue(struct {
-		RouteID        string      `json:"route_id"`
-		Target         interface{} `json:"target"`
-		FactSchema     string      `json:"fact_schema"`
-		FunctionSchema string      `json:"function_schema"`
-		Prompt         string      `json:"prompt"`
-		Mapper         string      `json:"mapper"`
-	}{routeID, target, policyFactGenerationVersion, policyFunctionGenerationVersion, policyPromptGenerationVersion, policyMapperGenerationVersion})
+		RouteID         string      `json:"route_id"`
+		Target          interface{} `json:"target"`
+		ReasoningEffort string      `json:"reasoning_effort,omitempty"`
+		FactSchema      string      `json:"fact_schema"`
+		FunctionSchema  string      `json:"function_schema"`
+		Prompt          string      `json:"prompt"`
+		Mapper          string      `json:"mapper"`
+	}{routeID, target, strings.TrimSpace(reasoningEffort), policyFactGenerationVersion, policyFunctionGenerationVersion, policyPromptGenerationVersion, policyMapperGenerationVersion})
 }
 
 func policyBinaryGeneration() string {
