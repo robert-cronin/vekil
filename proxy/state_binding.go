@@ -260,10 +260,16 @@ func (s *stateBindingStore) lookup(stateType stateBindingType, token string) sta
 }
 
 // resolve requires all supplied state tokens to be known and owned by exactly
-// the same route and target. All-unknown input resolves unknown. A live
-// tombstone, malformed input, mixed known/unknown input, or differing owners
-// resolves conflict so callers fail locally without an upstream call.
+// the same route and target. Missing bindings resolve unknown unless a live
+// tombstone, malformed input, or differing known owners establishes conflict.
+// Neither unknown nor conflict permits an upstream call.
 func (s *stateBindingStore) resolve(tokens []stateBindingToken) stateBindingLookupResult {
+	return s.resolveWithRoute(tokens, "", "")
+}
+
+// A non-empty routeID or pinnedTargetID also rejects known owners outside that
+// route or target, even when another token is unknown.
+func (s *stateBindingStore) resolveWithRoute(tokens []stateBindingToken, routeID, pinnedTargetID string) stateBindingLookupResult {
 	if len(tokens) == 0 || s == nil {
 		return stateBindingLookupResult{outcome: stateBindingLookupUnknown}
 	}
@@ -290,11 +296,9 @@ func (s *stateBindingStore) resolve(tokens []stateBindingToken) stateBindingLook
 			return stateBindingLookupResult{outcome: stateBindingLookupConflict}
 		case stateBindingLookupUnknown:
 			haveUnknown = true
-			if haveKnown {
-				return stateBindingLookupResult{outcome: stateBindingLookupConflict}
-			}
 		case stateBindingLookupKnown:
-			if haveUnknown {
+			if (routeID != "" && result.owner.routeID != routeID) ||
+				(pinnedTargetID != "" && result.owner.targetID != pinnedTargetID) {
 				return stateBindingLookupResult{outcome: stateBindingLookupConflict}
 			}
 			if !haveKnown {
@@ -310,16 +314,17 @@ func (s *stateBindingStore) resolve(tokens []stateBindingToken) stateBindingLook
 		}
 	}
 
-	if haveKnown {
+	if haveKnown && !haveUnknown {
 		return stateBindingLookupResult{outcome: stateBindingLookupKnown, owner: owner}
 	}
 	return stateBindingLookupResult{outcome: stateBindingLookupUnknown}
 }
 
-// resolveForRoute additionally rejects a token known to another public route.
-// A known result's targetID is the only target eligible for the operation.
-func (s *stateBindingStore) resolveForRoute(routeID string, tokens []stateBindingToken) stateBindingLookupResult {
-	result := s.resolve(tokens)
+// resolveForRoute additionally rejects a token known to another public route
+// or a different target when the operation is already pinned. A known result's
+// targetID is the only target eligible for the operation.
+func (s *stateBindingStore) resolveForRoute(routeID, pinnedTargetID string, tokens []stateBindingToken) stateBindingLookupResult {
+	result := s.resolveWithRoute(tokens, routeID, pinnedTargetID)
 	if result.outcome != stateBindingLookupKnown {
 		return result
 	}
