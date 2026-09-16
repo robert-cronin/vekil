@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -270,4 +272,76 @@ func TestDurableStateConstructorFailureReleasesLock(t *testing.T) {
 	if err := srv.proxyHandler.WaitLifecycleWorkers(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestDurableStateListenFailureReleasesLock(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opts := WithProxyOptions(proxy.WithDurableStateBindings(proxy.DurableStateBindingsConfig{Path: filepath.Join(dir, "state.db")}))
+	newServer := func(port string) (*Server, error) {
+		return New(auth.NewTestAuthenticator("synthetic-token"), logger.NewWithWriter(logger.LevelError, io.Discard), "127.0.0.1", port, opts)
+	}
+	srv, err := newServer(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	assertLocked := func() {
+		t.Helper()
+		if extra, openErr := newServer("0"); openErr == nil {
+			_ = extra.Stop(context.Background())
+			t.Fatal("store admitted a second owner")
+		} else if !strings.Contains(openErr.Error(), "already in use") {
+			t.Fatalf("second owner = %v, want store lock refusal", openErr)
+		}
+	}
+	assertLocked()
+	err = srv.Start()
+	var listenErr *net.OpError
+	if !errors.As(err, &listenErr) || listenErr.Op != "listen" {
+		t.Fatalf("Start = %v, want original listener error", err)
+	}
+	if srv.IsRunning() {
+		t.Fatal("failed listener marked server running")
+	}
+	// No explicit Stop or GC may be needed before the replacement acquires
+	// the same existing file. This is a real TCP collision and bbolt lock.
+	replacement, err := newServer("0")
+	if err != nil {
+		t.Fatalf("replacement after listen failure = %v", err)
+	}
+	t.Cleanup(func() { _ = replacement.Stop(context.Background()) })
+	if !srv.proxyHandler.ShuttingDown() {
+		t.Error("failed generation still admits upstream work")
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(); err == nil {
+		t.Fatal("failed generation restarted after resource finalization")
+	}
+	if err := replacement.Start(); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + replacement.Addr() + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("replacement health = %d", resp.StatusCode)
+	}
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Fatalf("repeated cleanup = %v", err)
+	}
+	assertLocked()
 }

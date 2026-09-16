@@ -45,6 +45,8 @@ connections. The lock is released only after HTTP/websocket handlers and detache
 workers actually finish; another `Stop` call is not required. A genuinely stuck
 handler or worker continues to hold the lock, and late storage-close errors are
 logged. Repeated `Stop` calls retain the original shutdown result.
+If listener startup fails, Vekil drains the failed instance and releases its store
+before returning the error. In-process callers must construct a new server to retry.
 
 ## What is recovered
 

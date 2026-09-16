@@ -496,11 +496,20 @@ func isLoopbackListenHost(host string) bool {
 }
 
 // Start begins listening in a goroutine. It returns an error if the listener
-// cannot be established.
+// cannot be established and finalizes owned resources before returning. Create
+// a new Server to retry after a failed start or shutdown.
 func (s *Server) Start() error {
+	if s.running.Load() {
+		return errors.New("server is already running")
+	}
+	if s.proxyHandler != nil && s.proxyHandler.ShuttingDown() {
+		return errors.New("server is shut down")
+	}
 	ln, err := net.Listen("tcp", s.httpServer.Addr)
 	if err != nil {
-		return fmt.Errorf("listen on %s: %w", s.httpServer.Addr, err)
+		// Construction already owns storage and detached-worker lifetimes even
+		// though no listener was served. Preserve both listen and cleanup errors.
+		return errors.Join(fmt.Errorf("listen on %s: %w", s.httpServer.Addr, err), s.Stop(context.Background()))
 	}
 
 	boundAddr := ln.Addr().String()
