@@ -734,12 +734,17 @@ func (h *ProxyHandler) handleResponseBodyWriteError(w http.ResponseWriter, r *ht
 	if !errors.As(err, &bodyErr) {
 		return false
 	}
-	if _, _, ok := durableStateFailureDetails(err); ok {
+	if message, _, ok := durableStateFailureDetails(err); ok {
 		if r != nil {
 			observeResponseFailureStatus(r.Context(), http.StatusServiceUnavailable)
 		}
 		if !bodyErr.committed {
-			writeDurableStateFailure(w, err)
+			switch endpoint {
+			case "anthropic", "anthropic_count_tokens":
+				writeAnthropicError(w, http.StatusServiceUnavailable, "overloaded_error", message)
+			default:
+				writeDurableStateFailure(w, err)
+			}
 		}
 		return true
 	}

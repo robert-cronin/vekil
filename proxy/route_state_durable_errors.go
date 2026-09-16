@@ -14,34 +14,76 @@ import (
 // including the headers later projected into websocket error frames. Inspect
 // every raw representation, not just the winning overlay, before emitting it.
 func durableResponsesErrorHeaderState(data []byte) ([]stateBindingToken, error) {
-	var envelope struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, err
-	}
-	switch strings.TrimSpace(envelope.Type) {
-	case "", "error", "response.failed":
-	default:
-		return nil, nil
-	}
-	type headerBlock struct {
-		Headers map[string]json.RawMessage `json:"headers"`
-	}
-	var event struct {
-		Headers  map[string]json.RawMessage `json:"headers"`
-		Error    headerBlock                `json:"error"`
-		Response struct {
-			Error headerBlock `json:"error"`
-		} `json:"response"`
-	}
+	var event map[string]json.RawMessage
 	if err := json.Unmarshal(data, &event); err != nil {
 		return nil, err
 	}
+	// Raw JSON is case-sensitive, but websocket structs accept folded aliases.
+	// Either interpretation (including SSE's missing-type fallback) may expose
+	// error headers. Reject aliases that could hide or replace the raw type.
+	_, hasType := event["type"]
+	inspect := !hasType
+	seenType := false
+	for name, raw := range event {
+		if !strings.EqualFold(name, "type") {
+			continue
+		}
+		if seenType {
+			return nil, errors.New("ambiguous response type aliases")
+		}
+		seenType = true
+		var eventType string
+		if err := json.Unmarshal(raw, &eventType); err != nil {
+			return nil, err
+		}
+		switch strings.TrimSpace(eventType) {
+		case "", "error", "response.failed":
+			inspect = true
+		}
+	}
+	if !inspect {
+		return nil, nil
+	}
 	var tokens []stateBindingToken
-	for _, rawHeaders := range []map[string]json.RawMessage{event.Headers, event.Error.Headers, event.Response.Error.Headers} {
-		headers := responsesStreamErrorHeaders(responsesWebSocketStreamError{Headers: rawHeaders})
-		values, err := explicitResponseHeaderStateTokens(headers)
+	for _, path := range [][]string{{"headers"}, {"error", "headers"}, {"response", "error", "headers"}} {
+		values, err := durableResponsesErrorHeaderPath(event, path)
+		if err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, values...)
+	}
+	return tokens, nil
+}
+
+// Walk only the fixed error-envelope paths, accepting single folded aliases but
+// rejecting competing spellings. Struct decoding can merge maps or replace
+// fields, and model rewriting can reorder those aliases before projection.
+// Unrelated metadata is not interpreted here.
+func durableResponsesErrorHeaderPath(object map[string]json.RawMessage, path []string) ([]stateBindingToken, error) {
+	if len(path) == 0 {
+		headers := responsesStreamErrorHeaders(responsesWebSocketStreamError{Headers: object})
+		// Websocket error frames flatten multiple values into a joined string,
+		// which is not the original token even when all values are identical.
+		if len(headers.Values("X-Codex-Turn-State")) > 1 {
+			return nil, errors.New("multiple response error turn-state values")
+		}
+		return explicitResponseHeaderStateTokens(headers)
+	}
+	var tokens []stateBindingToken
+	seen := false
+	for name, raw := range object {
+		if !strings.EqualFold(name, path[0]) {
+			continue
+		}
+		if seen {
+			return nil, errors.New("ambiguous response error header aliases")
+		}
+		seen = true
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &nested); err != nil {
+			return nil, err
+		}
+		values, err := durableResponsesErrorHeaderPath(nested, path[1:])
 		if err != nil {
 			return nil, err
 		}

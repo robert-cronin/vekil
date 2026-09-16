@@ -78,6 +78,7 @@ go test . -run '^Test(DurableStateProcessCrashReopen|StatePruneCommand)' -count=
 go test -race ./... -count=1
 GOMAXPROCS=2 go test ./proxy -run '^$' -bench '^BenchmarkStateBindingExposure$' -benchtime=100x -benchmem -count=10
 GOMAXPROCS=2 go test ./proxy -run '^$' -bench '^BenchmarkDurableStateLookupAndOpen$' -benchtime=10x -benchmem -count=10
+GOMAXPROCS=2 go test ./proxy -run '^$' -bench '^BenchmarkDurableNestedResponseValidation$' -benchtime=5x -benchmem -count=3
 ```
 
 Coverage includes real binary/process crash and reopen, kills before/after commit
@@ -97,6 +98,10 @@ samples with fixed CPU settings and an otherwise quiet host. Record raw results,
 filesystem, Go version and exact revision privately; do not copy machine data to
 the repository. These tests exclude provider/network latency. The prepared-stream
 TTFT benchmark alone does not exercise persistence.
+The nested-response benchmark measures the complete JSON/SSE writers at depths
+1,000/2,000/4,000 with already-recorded state. Compare allocated bytes per
+operation to detect diagnostic-path allocation amplification independently of
+first-issuance storage latency.
 
 ### Policy-routing safety suite
 

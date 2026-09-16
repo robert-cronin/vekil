@@ -174,3 +174,45 @@ func BenchmarkDurableStateLookupAndOpen(b *testing.B) {
 		})
 	}
 }
+
+// Measure the complete writers, not just the duplicate-key scanner. Existing
+// proof avoids fsync variability so allocation growth in nested extensions is
+// visible. JSON diagnostic paths must not make that growth quadratic.
+func BenchmarkDurableNestedResponseValidation(b *testing.B) {
+	for _, depth := range []int{1000, 2000, 4000} {
+		for _, stream := range []bool{false, true} {
+			b.Run(fmt.Sprintf("depth=%d/sse=%t", depth, stream), func(b *testing.B) {
+				s, _ := durableBenchmarkStore(b, true, 0)
+				h := &ProxyHandler{stateBindings: s}
+				h.stateBindingsOnce.Do(func() {})
+				info := explicitRouteResponseInfo{routeID: "route", targetID: "target", publicID: "public", stateIdentity: [32]byte{1}}
+				if err := h.bindExplicitStateTokens(info, []stateBindingToken{{stateBindingTypeResponseID, "nested-response-fixture"}}); err != nil {
+					b.Fatal(err)
+				}
+				body := []byte(durableNestedResponseFixture(depth, "0"))
+				if stream {
+					body = []byte(responsesRouteSSE("response.completed", `{"type":"response.completed","response":`+string(body)+`}`))
+				}
+				b.ReportAllocs()
+				b.SetBytes(int64(len(body)))
+				b.ResetTimer()
+				for range b.N {
+					if stream {
+						reader := normalizeResponsesStreamBodyWithBinding(h, io.NopCloser(bytes.NewReader(body)), info)
+						_, err := io.Copy(io.Discard, reader)
+						_ = reader.Close()
+						if err != nil {
+							b.Fatal(err)
+						}
+					} else {
+						w := &stateExposureBenchmarkWriter{headers: make(http.Header)}
+						resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}
+						if err := writeExplicitResponsesResponse(context.Background(), h, w, resp, info, nil, ""); err != nil {
+							b.Fatal(err)
+						}
+					}
+				}
+			})
+		}
+	}
+}

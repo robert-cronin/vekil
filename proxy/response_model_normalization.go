@@ -103,6 +103,20 @@ func responsesLifecycleEventHasResponse(eventType string) bool {
 	}
 }
 
+func validateUnambiguousResponsesJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	// Unlike configuration diagnostics, this path must not build an ever-longer
+	// path at each nesting level. Those discarded strings cost quadratic space.
+	if err := scanJSONValueForDuplicateKeys(decoder, "", false); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("expected one complete JSON response")
+	}
+	return nil
+}
+
 func writeExplicitResponsesResponse(ctx context.Context, h *ProxyHandler, w http.ResponseWriter, resp *http.Response, info explicitRouteResponseInfo, store *ToolExecutionContextStore, scope string) error {
 	durable := h != nil && h.stateBindings != nil && h.stateBindings.durable != nil
 	if resp == nil || (resp.Body == nil && !durable) {
@@ -124,6 +138,13 @@ func writeExplicitResponsesResponse(ctx context.Context, h *ProxyHandler, w http
 	}
 	if len(data) > maxLargeRequestBodySize {
 		return newResponseBodyWriteError(resp, errors.New("explicit route response exceeds normalization limit"), false, true, false)
+	}
+	if durable && len(data) != 0 {
+		// Map decoding loses earlier duplicate values while nested raw JSON
+		// can still expose them. Reject ambiguity before binding any batch state.
+		if err := validateUnambiguousResponsesJSON(data); err != nil {
+			return newResponseBodyWriteError(resp, errors.New("ambiguous explicit route responses JSON"), false, true, false)
+		}
 	}
 
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
@@ -325,6 +346,13 @@ func rewriteResponsesSSEEventModel(raw []byte, publicModel string, onEvent func(
 
 func normalizeResponsesStreamBodyWithBinding(h *ProxyHandler, source io.ReadCloser, info explicitRouteResponseInfo) io.ReadCloser {
 	return normalizeResponsesStreamBody(source, info.publicID, func(data []byte) error {
+		if h != nil && h.stateBindings != nil && h.stateBindings.durable != nil {
+			// Validate the original event, before extraction or model rewriting
+			// can collapse duplicates that remain visible in a raw representation.
+			if err := validateUnambiguousResponsesJSON(data); err != nil {
+				return errors.New("ambiguous explicit route responses JSON")
+			}
+		}
 		tokens, err := extractExplicitResponsesOutputState(data)
 		if err != nil {
 			if h != nil && h.stateBindings != nil && h.stateBindings.durable != nil {

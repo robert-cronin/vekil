@@ -70,6 +70,15 @@ bounded HTTP status text so discarded body state cannot escape inside a string.
 Durable Responses failure events also commit turn state carried in root or
 nested error headers atomically with the event's body state, before either the
 raw event or a projected websocket error can expose it.
+Single case-variant JSON error-envelope members accepted by websocket decoding
+are supported. Competing spellings such as `headers` and `Headers`, or multiple
+turn-state values that websocket projection would join, are rejected before
+exposure. HTTP header names retain their case-insensitive semantics.
+Durable JSON responses and stream events reject duplicate object keys before
+binding or forwarding, including escaped spellings of the same key. Reusing a
+key in distinct objects or inside a string is valid. Ambiguous events terminate
+the stream without exposing or recording their state; memory-only passthrough
+is unchanged.
 
 Ownership includes route/target/provider identity, the effective endpoint and
 query, physical model/deployment, and authenticated account/tenant scope from
@@ -141,6 +150,9 @@ unrecorded state is exposed. The failing process freezes use of an uncertain
 store until operator repair and reopen. A storage failure after inference never
 authorizes Vekil to retry that inference or switch targets. Previously exposed,
 committed state remains recorded even when a later event fails.
+Direct Anthropic Messages and Count Tokens use their native `type: error`
+envelope with `overloaded_error` and the same bounded storage-failure message,
+rather than OpenAI-specific error fields.
 
 These are local infrastructure failures, not model safety decisions or native
 tool-approval verdicts. Do not bypass approvals or replay a refused tool to test
