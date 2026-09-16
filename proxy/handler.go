@@ -680,9 +680,9 @@ func (h *ProxyHandler) WaitLifecycleWorkers(ctx context.Context) (err error) {
 	if h == nil {
 		return nil
 	}
-	// Server.stop calls this after http.Server.Shutdown. Clear replay state only
-	// after a successful, non-expired drain; a forced-close timeout can still have
-	// handler goroutines unwinding from lifecycle cancellation.
+	// Server.stop calls this after actual HTTP handler return, even when its
+	// caller timed out. Other callers must likewise establish handler drain;
+	// an expired context alone is not proof that handlers have finished.
 	defer func() {
 		if err == nil && h.ShuttingDown() && (ctx == nil || ctx.Err() == nil) {
 			h.closeResponsesChatReplayStore()

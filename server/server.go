@@ -31,6 +31,12 @@ type Server struct {
 	stopDone     chan struct{}
 	stopErr      error
 	serveDone    chan error
+	// A force-closed net/http connection may outlive Shutdown in its handler.
+	// Gate registration before Wait so such handlers (including hijacked ones)
+	// retain generation-owned stores until their actual return.
+	requestHandlersMu       sync.Mutex
+	requestHandlers         sync.WaitGroup
+	requestHandlersDraining bool
 }
 
 type options struct {
@@ -433,7 +439,7 @@ func New(authenticator *auth.Authenticator, log *logger.Logger, host, port strin
 
 	addr := fmt.Sprintf("%s:%s", host, port)
 	httpHandler := withRequestLog(withInboundAuth(withProviderValidationGate(mux, handler), cfg.inboundAuthToken), log, handler, cfg.inboundAuthToken)
-	return &Server{
+	srv := &Server{
 		httpServer: &http.Server{
 			Addr:         addr,
 			Handler:      httpHandler,
@@ -448,7 +454,27 @@ func New(authenticator *auth.Authenticator, log *logger.Logger, host, port strin
 		log:          log,
 		dynamicAddr:  strings.TrimSpace(port) == "0",
 		serveDone:    make(chan error, 1),
-	}, nil
+	}
+	srv.httpServer.Handler = srv.withRequestHandlerDrain(httpHandler)
+	return srv, nil
+}
+
+func (s *Server) withRequestHandlerDrain(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.requestHandlersMu.Lock()
+		tracked := !s.requestHandlersDraining
+		if tracked {
+			s.requestHandlers.Add(1)
+		}
+		s.requestHandlersMu.Unlock()
+		if tracked {
+			defer s.requestHandlers.Done()
+		}
+		// BeginShutdown runs before registration closes. Late requests therefore
+		// reach only withRequestLog's shutdown rejection (or the health probe),
+		// neither of which can access generation-owned continuation stores.
+		next.ServeHTTP(w, r)
+	})
 }
 
 func validatePolicyRoutingListenHost(host string, policyActive, allowRemoteSingleTenant bool) error {
@@ -600,6 +626,11 @@ func (s *Server) stop(ctx context.Context) error {
 	if s.proxyHandler != nil {
 		s.proxyHandler.BeginShutdown()
 		s.proxyHandler.SetStartupAuthenticationPending(false)
+	}
+	s.requestHandlersMu.Lock()
+	s.requestHandlersDraining = true
+	s.requestHandlersMu.Unlock()
+	if s.proxyHandler != nil {
 		websocketErr = s.proxyHandler.ShutdownWebSocketSessions(ctx)
 	}
 	shutdownErr := s.httpServer.Shutdown(ctx)
@@ -612,8 +643,25 @@ func (s *Server) stop(ctx context.Context) error {
 			forceCloseErr = nil
 		}
 	}
-	if s.proxyHandler != nil {
-		workerErr = s.proxyHandler.WaitLifecycleWorkers(ctx)
+	// Stop has one owner and caches its result. Keep a single finalizer alive
+	// beyond that caller's deadline: Close does not wait for HTTP handlers, and
+	// a deadline must not leak the store lock once all real work has finished.
+	finalized := make(chan error, 1)
+	go func() {
+		s.requestHandlers.Wait()
+		var err error
+		if s.proxyHandler != nil {
+			err = s.proxyHandler.WaitLifecycleWorkers(context.Background())
+		}
+		if err != nil && s.log != nil {
+			s.log.Error("server resource finalization failed", logger.Err(err))
+		}
+		finalized <- err
+	}()
+	select {
+	case workerErr = <-finalized:
+	case <-ctx.Done():
+		workerErr = ctx.Err()
 	}
 	s.running.Store(false)
 	return errors.Join(websocketErr, shutdownErr, forceCloseErr, workerErr)

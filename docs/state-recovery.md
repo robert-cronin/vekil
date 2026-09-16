@@ -37,6 +37,11 @@ store to give several replicas independent writable copies. This is not shared
 storage, cross-host failover, or a replacement for ingress affinity. Shutdown
 retains the lock until a successful drain; an incomplete drain does not admit a
 replacement writer while the old process can still write.
+If the shutdown caller times out, finalization continues after force-closing
+connections. The lock is released only after HTTP/websocket handlers and detached
+workers actually finish; another `Stop` call is not required. A genuinely stuck
+handler or worker continues to hold the lock, and late storage-close errors are
+logged. Repeated `Stop` calls retain the original shutdown result.
 
 ## What is recovered
 
