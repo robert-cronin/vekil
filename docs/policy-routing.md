@@ -27,7 +27,7 @@ A policy public ID is supported for:
 - text-only canonical Chat messages and standard function tools;
 - Responses namespace tools flattened to deterministic function aliases;
 - OpenAI-family terminal routes served by native `/chat/completions` or bounded Chat-over-Responses;
-- one per-turn decision with no general affinity or session cache, except process-local replay that remains bound to its originating route and tier; and
+- one per-turn decision with no general affinity or session cache, except active tool replay that remains bound to its originating route and tier; and
 - the built-in `coding_agent_v1` classifier profile.
 
 The policy can run in `off`, asynchronous `observe`, or synchronous `enforce` mode. One root request resolves one policy profile and selects one terminal route. Physical failover, if configured, stays inside that selected route.
@@ -52,9 +52,11 @@ Direct public models and direct exposed terminal routes retain their existing en
 
 Policy Responses compatibility is deliberately not near-zero-copy passthrough. It converts bounded Responses input into canonical Chat, applies policy planning, executes the selected native or Responses-backed Chat terminal, aggregates the terminal result, and emits Responses JSON/SSE. Bounded `text.format` values are mapped to Chat `response_format`, including Codex `--output-schema` JSON schemas. It accepts Codex-style full stateless history, including prior `function_call` plus `function_call_output` items. Namespace children are flattened to deterministic names of at most 64 characters and mapped back to `namespace` plus `name` in the returned function call. Completed terminal output is checked against `tool_choice`; required or forced choices cannot complete without a matching function call. The launcher disables hosted web search, remote compaction, freeform apply-patch, Responses Lite, code-only tool modes, and inherited speed tiers for policy-owned Codex models. Deferred tool discovery remains unsupported: `defer_loading: true` and `tool_search` fail locally instead of being silently flattened or ignored. The adapter accepts large direct function catalogs for downstream Responses-backed Chat bridges. Native OpenAI/Azure Chat destinations may impose a 128-function limit, so deployments using those terminals must constrain the client catalog accordingly.
 
-When Vekil itself owns a Responses-backed terminal, `call_vekil_*` state records the originating route and policy tier, so same-process continuations remain pinned even in `enforce`. A downstream Chat-compatible bridge may also return process-local replay IDs; those continuations remain limited to an `off`/`observe` baseline with one target and require a single bridge instance or sticky ingress to the replay-owning process. One configured target proves route determinism, not replica affinity.
+When Vekil itself owns a Responses-backed terminal, `call_vekil_*` state records the originating route and policy tier. Active tool-result continuations remain pinned even in `enforce`. Completed tool history can survive a new tier decision when both tiers configure reasoning effort and each has exactly one Responses target with the same provider and upstream model. Every earlier tool call must have a result, followed by an assistant reply without tool calls, before a later nonempty user task can trigger reclassification. Vekil restores each historical group under its original exact binding, including encrypted reasoning; expiry, missing state, and invalid projections still fail. Routes using different providers/models or multiple targets retain their original replay binding.
 
-Native Chat tool history must be complete and internally consistent before classifier admission. Assistant tool-call IDs must be unique, every tool result must reference one pending prior call exactly once, and all pending calls must receive results before the next non-tool message. Parallel results may arrive in any order. Malformed, missing, unknown, or duplicate tool-call relationships fail locally with no classifier or terminal-model send.
+A downstream Chat-compatible bridge may also return process-local replay IDs; those continuations remain limited to an `off`/`observe` baseline with one target and require a single bridge instance or sticky ingress to the replay-owning process. One configured target proves route determinism, not replica affinity.
+
+Policy requests must have complete and internally consistent tool history before classifier admission, including requests entering through Responses compatibility. Assistant tool-call IDs must be unique, every tool result must reference one pending prior call exactly once, and all pending calls must receive results before the next non-tool message. Parallel results may arrive in any order. Malformed, missing, unknown, or duplicate tool-call relationships fail locally with no classifier or terminal-model send.
 
 ## Quick start
 
@@ -154,6 +156,8 @@ When the pair is configured, it is authoritative policy execution state rather t
 
 When both tier values are omitted, the policy profile does not control or advertise reasoning effort. Requests must omit an explicit non-null effort; Vekil rejects one locally instead of forwarding it or letting it influence tier selection.
 
+Set `classifier.reasoning_effort` to control classification independently of client and terminal tier effort. For example, `reasoning_effort: low` keeps the classifier at low effort even when it selects the powerful tier. The value must appear in the classifier route's `model_routes[].reasoning_effort` allowlist. Vekil sends it as Chat `reasoning_effort` or Responses `reasoning.effort`. When omitted, Vekil sends no classifier effort setting and leaves the choice to the provider.
+
 The v1 defaults are economy-oriented:
 
 - baseline: `lightweight`;
@@ -171,6 +175,7 @@ Unavailable and uncertain fallbacks are not cached in v1.
 | `classifier_unavailable_tier` | `baseline_tier` |
 | `classifier_uncertain_tier` | `powerful` |
 | classifier `profile` | `coding_agent_v1` |
+| classifier `reasoning_effort` | omitted, provider default |
 | `timeout_ms` | `3000` |
 | `max_completion_tokens` | `256` |
 | `max_request_bytes` | `16000` |
@@ -182,6 +187,7 @@ Valid classifier profile ranges are:
 
 | Field | Valid range |
 |---|---|
+| `reasoning_effort` | optional non-empty value from the classifier route's `reasoning_effort` allowlist |
 | `timeout_ms` | `100..10000` |
 | `max_completion_tokens` | `32..1024` |
 | `max_request_bytes` | `1024..65536` |
@@ -197,7 +203,8 @@ Validation also rejects:
 - public metadata on an internal route;
 - recursive policy references;
 - a null or non-object `lightweight`/`powerful` tier object, missing or unknown tier fields, a null/empty/whitespace-only tier `reasoning_effort`, or effort configured on only one tier;
-- a tier reasoning value absent from its referenced terminal route's `reasoning_effort` allowlist;
+- a null/empty/whitespace-only classifier `reasoning_effort`;
+- a tier or classifier reasoning value absent from its referenced route's `reasoning_effort` allowlist;
 - destination routes without `/chat/completions` or `/responses` Chat execution support;
 - unsupported provider families or dynamic providers other than pinned `type: copilot` targets;
 - terminal routes with different preferred Chat backends or other public Chat request semantics;
@@ -262,14 +269,16 @@ If root cancellation or lifecycle shutdown occurs during classification, Vekil r
 Classifier facts are built before tool-output optimization and contain bounded user/system content. Vekil includes:
 
 - system/developer anchors, capped at 2,000 UTF-8 bytes total;
-- the first user task, capped at 4,000 UTF-8 bytes;
-- up to `recent_turns` recent non-anchor text messages, each capped at 1,500 UTF-8 bytes;
+- `current_user_task`, the latest user message containing non-whitespace text, capped at 4,000 UTF-8 bytes;
+- up to `recent_turns` recent text messages excluding anchors and the current task, each capped at 1,500 UTF-8 bytes;
 - function-tool names only, capped at 128 UTF-8 bytes each and 128 tools total;
 - typed message, tool, and context counts; and
 - original byte counts and truncation flags.
 
 The serialized canonical facts JSON is capped at `max_request_bytes`; the fixed forced-tool Chat envelope is separately bounded by the implementation.
 Client policy requests larger than 1 MiB are rejected before translation or fact materialization so classifier admission cannot be bypassed with oversized message/tool arrays. The trusted policy Responses-to-Chat bridge may expand an accepted request while flattening namespace tools and adding canonical Chat wrappers; that internal body is separately capped at the ordinary 10 MiB Chat request ceiling before facts are built or a terminal route is selected.
+
+The classifier assesses the current task and uses setup instructions and older messages as context. Clipping that context does not by itself force a simple greeting or self-contained question to `powerful`. A clipped current task remains conservative, as does clipped context when there is no user task. Context-dependent follow-ups still use conservative classifier signals when missing context leaves their scope unclear.
 
 Vekil excludes provider credentials, inbound authorization, provider state, replay IDs, session identifiers, raw routing metadata, physical deployment names, function parameter schemas, and tool arguments. Classifier decisions and metrics also exclude prompt text and raw model output.
 
@@ -302,7 +311,7 @@ After fallback precedence, the mapper selects `powerful` when any of these is tr
 - `risk_level` is `high`;
 - `modifying_tool_call_count_estimate >= 2`;
 - `requires_codebase_context` is true; or
-- the local fact builder truncated task/context content.
+- the local fact builder truncated the current task, or truncated context when no user task is available.
 
 Otherwise it selects `lightweight`. The built-in classifier calibration treats an explicit low- or medium-risk edit bounded to one file or one function as `edit` with `file`/`function` scope and no broad codebase-context requirement unless the request actually depends on cross-file or cross-module information. Inspecting the named target and nearby lines does not by itself make the request codebase-wide.
 
@@ -331,7 +340,7 @@ A classifier-local timeout uses `classifier_unavailable_tier` for that request b
 
 Classifier sends have their own timeout, concurrency admission, operation, and one-send budget. They do not consume the selected terminal route's target-attempt or upstream-send budgets.
 
-After selection, all terminal failure behavior remains inside the chosen route. A Responses-backed tool-result continuation first resolves its process-local replay owner and remains bound to the originating terminal tier/target; it does not run a new classifier decision that could migrate the replay state.
+After selection, all terminal failure behavior remains inside the chosen route. An active Responses-backed tool-result continuation first resolves its process-local replay owner and remains bound to the originating terminal tier/target without running the classifier. Once the tool turn is complete, a later user task can select a new effort under the same-provider/model restrictions described above. This changes effort for the new turn while preserving each historical group's original replay binding.
 
 - a failed lightweight route never invokes powerful;
 - a failed powerful route never downgrades;
@@ -348,8 +357,10 @@ When any profile's **effective** mode is `observe` or `enforce`, startup perform
 - authentication and endpoint reachability;
 - forced `emit_policy_signals` selection;
 - strict argument-schema acceptance;
-- acceptance of the configured non-storage behavior; and
+- acceptance of the configured classifier reasoning effort and non-storage behavior; and
 - a maximum of one physical send.
+
+Preflight and runtime classification use the same classifier effort. Profiles sharing one classifier route must agree on `timeout_ms`, `max_completion_tokens`, and `reasoning_effort`, including whether effort is omitted.
 
 Mode-specific behavior:
 
@@ -414,7 +425,7 @@ Each bounded decision record carries IDs/enums/counts, latency/failure categorie
 
 - `configGeneration`: canonical normalized complete providers configuration;
 - `profileGeneration`: normalized profile, including its tier route/effort objects, derived public contract, terminal route IDs, and effective profile-wide request policy;
-- `classifierGeneration`: classifier route/target/model plus fact schema, forced-function schema, classifier-prompt, and mapper versions; and
+- `classifierGeneration`: classifier route/target/model and configured classifier effort, plus fact schema, forced-function schema, classifier-prompt, and mapper versions; and
 - `binaryGeneration`: build version plus Git commit when available.
 
 Generation hashes use normalized values and exclude secret values. Decision records, logs, and aggregate labels never contain prompt text, raw classifier output, tool arguments, credentials, or classifier rationale.

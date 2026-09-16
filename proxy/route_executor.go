@@ -269,6 +269,7 @@ func newRouteOperationFromChatPlan(plan chatOperationPlan, inbound context.Conte
 	sealed.candidates = plan.candidateSnapshot()
 	sealed.contract = clonePublicModelContract(plan.contract)
 	sealed.terminalParallelToolCalls = cloneBoolPtr(plan.terminalParallelToolCalls)
+	sealed.completedPolicyReplayRoutes = plan.completedPolicyReplayRouteSnapshot()
 	sealed.operationRoute = plan.routeSnapshot()
 	operation := newRouteOperationWithID(sealed.operationRoute, inbound, sealed.operationID)
 	if operation == nil {
@@ -286,6 +287,7 @@ func (o *routeOperation) policyPlan() (chatOperationPlan, bool) {
 	plan.candidates = o.chatPlan.candidateSnapshot()
 	plan.contract = clonePublicModelContract(o.chatPlan.contract)
 	plan.terminalParallelToolCalls = cloneBoolPtr(o.chatPlan.terminalParallelToolCalls)
+	plan.completedPolicyReplayRoutes = o.chatPlan.completedPolicyReplayRouteSnapshot()
 	plan.operationRoute = o.chatPlan.routeSnapshot()
 	return plan, true
 }
