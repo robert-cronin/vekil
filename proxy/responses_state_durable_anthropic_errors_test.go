@@ -41,13 +41,17 @@ func TestDurableAnthropicStorageFailureEnvelope(t *testing.T) {
 					h := newOperationAdmissionTestHandler(t, providerTypeAnthropicCompatible, []string{providerEndpointMessages}, upstream.URL)
 					h.stateBindings = s
 					h.stateBindingsOnce.Do(func() {})
-					r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"public-model","max_tokens":16,"messages":[{"role":"user","content":"fixture"}]}`))
-					w := httptest.NewRecorder()
-					if path == "/v1/messages" {
-						h.HandleAnthropicMessages(w, r)
-					} else {
-						h.HandleAnthropicMessagesCountTokens(w, r)
+					invoke := func() *httptest.ResponseRecorder {
+						r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"public-model","max_tokens":16,"messages":[{"role":"user","content":"fixture"}]}`))
+						w := httptest.NewRecorder()
+						if path == "/v1/messages" {
+							h.HandleAnthropicMessages(w, r)
+						} else {
+							h.HandleAnthropicMessagesCountTokens(w, r)
+						}
+						return w
 					}
+					w := invoke()
 					if w.Code != http.StatusServiceUnavailable || sends.Load() != 1 || w.Header().Get("Content-Type") != "application/json" {
 						t.Fatalf("status=%d sends=%d headers=%v body=%s", w.Code, sends.Load(), w.Header(), w.Body.String())
 					}
@@ -64,6 +68,20 @@ func TestDurableAnthropicStorageFailureEnvelope(t *testing.T) {
 					}
 					if w.Header().Get("X-Codex-Turn-State") != "" || strings.Contains(w.Body.String(), "fixture") || s.lookup(stateBindingTypeTurnState, "withheld-anthropic-fixture").outcome != stateBindingLookupUnknown {
 						t.Fatal("uncommitted provider state escaped or was recorded")
+					}
+					if failure == "io" {
+						// The first real request froze the store at the commit seam.
+						// Subsequent requests fail before dispatch, with the same
+						// bounded native envelope, including after the store closes.
+						for _, phase := range []string{"frozen", "closed"} {
+							if phase == "closed" {
+								closeDurableStoreFixture(t, s)
+							}
+							followup := invoke()
+							if followup.Code != http.StatusServiceUnavailable || followup.Body.String() != w.Body.String() || sends.Load() != 1 || followup.Header().Get("X-Codex-Turn-State") != "" {
+								t.Fatalf("%s pre-dispatch failure: status=%d sends=%d body=%s", phase, followup.Code, sends.Load(), followup.Body.String())
+							}
+						}
 					}
 				})
 			}

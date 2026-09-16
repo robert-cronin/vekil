@@ -153,6 +153,7 @@ committed state remains recorded even when a later event fails.
 Direct Anthropic Messages and Count Tokens use their native `type: error`
 envelope with `overloaded_error` and the same bounded storage-failure message,
 rather than OpenAI-specific error fields.
+The same message is returned before dispatch when the store is frozen or closed.
 
 These are local infrastructure failures, not model safety decisions or native
 tool-approval verdicts. Do not bypass approvals or replay a refused tool to test
