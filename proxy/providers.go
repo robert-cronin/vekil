@@ -225,6 +225,7 @@ type openAICodexModelPayload struct {
 
 type providerRequestError struct {
 	statusCode int
+	code       string
 	err        error
 }
 
@@ -250,6 +251,14 @@ func (e *providerRequestError) Unwrap() error {
 		return nil
 	}
 	return e.err
+}
+
+func providerRequestErrorCode(err error) string {
+	var providerErr *providerRequestError
+	if errors.As(err, &providerErr) {
+		return providerErr.code
+	}
+	return ""
 }
 
 // LoadProvidersConfigFile loads a provider configuration from a local path or
