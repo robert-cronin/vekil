@@ -345,3 +345,108 @@ func TestDurableStateListenFailureReleasesLock(t *testing.T) {
 	}
 	assertLocked()
 }
+
+func TestDurableStateStopDuringListenRetainsLockUntilCleanup(t *testing.T) {
+	for _, name := range []string{"before-bind", "bound-before-handoff", "bind-failure"} {
+		t.Run(name, func(t *testing.T) {
+			port := "0"
+			if name == "bind-failure" {
+				reservation, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = reservation.Close() })
+				port = strconv.Itoa(reservation.Addr().(*net.TCPAddr).Port)
+			}
+			dir := t.TempDir()
+			if err := os.Chmod(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			opts := WithProxyOptions(proxy.WithDurableStateBindings(proxy.DurableStateBindingsConfig{Path: filepath.Join(dir, "state.db")}))
+			newServer := func() (*Server, error) {
+				return New(auth.NewTestAuthenticator("synthetic-token"), logger.NewWithWriter(logger.LevelError, io.Discard), "127.0.0.1", port, opts)
+			}
+			srv, err := newServer()
+			if err != nil {
+				t.Fatal(err)
+			}
+			barrier := newStartupListenBarrier(t, name == "before-bind")
+			srv.listen = barrier.listen
+			t.Cleanup(func() {
+				barrier.unblock()
+				_ = srv.Stop(context.Background())
+			})
+			startDone := make(chan error, 1)
+			go func() { startDone <- srv.Start() }()
+			select {
+			case <-barrier.entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Start did not reach listener barrier")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			stopErr := srv.Stop(ctx)
+			cancel()
+			if !errors.Is(stopErr, context.DeadlineExceeded) {
+				t.Errorf("Stop while listener is held = %v, want deadline", stopErr)
+			}
+			if barrier.ctx.Err() == nil {
+				t.Error("Stop did not cancel pending Listen")
+			}
+			if replacement, openErr := newServer(); openErr == nil {
+				_ = replacement.Stop(context.Background())
+				t.Error("store released before pending listener cleanup")
+			} else if !strings.Contains(openErr.Error(), "already in use") {
+				t.Fatalf("replacement before cleanup = %v", openErr)
+			}
+			if err := srv.Start(); err == nil || barrier.calls.Load() != 1 {
+				t.Error("stopping generation admitted another Start")
+			}
+			barrier.unblock()
+			startErr := awaitStartupResult(t, startDone)
+			if startErr == nil {
+				t.Error("Start succeeded after Stop had claimed the generation")
+			}
+			// Listen's context governs name resolution, not the returned socket;
+			// a numeric address may still bind after cancellation. Preserve an
+			// actual listener error, and close every late successful listener.
+			if barrier.listenErr != nil && !errors.Is(startErr, barrier.listenErr) {
+				t.Errorf("Listen error lost: %v, want %v", startErr, barrier.listenErr)
+			}
+			if name == "bind-failure" && barrier.listenErr == nil {
+				t.Error("occupied-port control unexpectedly succeeded")
+			}
+			if srv.IsRunning() {
+				t.Error("stopped generation was marked running")
+			}
+			if barrier.addr != "" {
+				conn, dialErr := net.DialTimeout("tcp", barrier.addr, time.Second)
+				if dialErr == nil {
+					_ = conn.Close()
+					t.Error("late listener was not closed")
+				}
+			}
+			// The original timed-out Stop owns one background finalizer. It must
+			// release the store after real listener cleanup without another Stop.
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				replacement, openErr := newServer()
+				if openErr == nil {
+					_ = replacement.Stop(context.Background())
+					break
+				}
+				if !strings.Contains(openErr.Error(), "already in use") || time.Now().After(deadline) {
+					t.Fatalf("replacement after listener cleanup = %v", openErr)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if again := srv.Stop(context.Background()); again != stopErr {
+				t.Fatalf("cached Stop changed from %v to %v", stopErr, again)
+			}
+			select {
+			case <-srv.Done():
+				t.Error("uncommitted startup published a Serve result")
+			default:
+			}
+		})
+	}
+}

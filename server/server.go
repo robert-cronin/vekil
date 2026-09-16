@@ -27,10 +27,15 @@ type Server struct {
 	running      atomic.Bool
 	boundAddr    atomic.Pointer[string]
 	dynamicAddr  bool
+	// stopMu owns the one-shot listener claim and the shutdown claim. Do not
+	// hold it across Listen, logging, or drain waits: Stop keeps its deadline.
 	stopMu       sync.Mutex
 	stopDone     chan struct{}
 	stopErr      error
+	listenerDone chan struct{}
+	cancelListen context.CancelFunc
 	serveDone    chan error
+	listen       func(context.Context, string, string) (net.Listener, error)
 	// A force-closed net/http connection may outlive Shutdown in its handler.
 	// Gate registration before Wait so such handlers (including hijacked ones)
 	// retain generation-owned stores until their actual return.
@@ -496,28 +501,57 @@ func isLoopbackListenHost(host string) bool {
 }
 
 // Start begins listening in a goroutine. It returns an error if the listener
-// cannot be established and finalizes owned resources before returning. Create
-// a new Server to retry after a failed start or shutdown.
+// cannot be established and shuts down that generation. A concurrent Stop
+// retains its deadline and background-finalization semantics. Create a new
+// Server to retry after a failed start or shutdown.
 func (s *Server) Start() error {
-	if s.running.Load() {
-		return errors.New("server is already running")
-	}
-	if s.proxyHandler != nil && s.proxyHandler.ShuttingDown() {
+	s.stopMu.Lock()
+	if s.stopDone != nil || (s.proxyHandler != nil && s.proxyHandler.ShuttingDown()) {
+		s.stopMu.Unlock()
 		return errors.New("server is shut down")
 	}
-	ln, err := net.Listen("tcp", s.httpServer.Addr)
-	if err != nil {
-		// Construction already owns storage and detached-worker lifetimes even
-		// though no listener was served. Preserve both listen and cleanup errors.
-		return errors.Join(fmt.Errorf("listen on %s: %w", s.httpServer.Addr, err), s.Stop(context.Background()))
+	if s.listenerDone != nil {
+		s.stopMu.Unlock()
+		return errors.New("server has already started")
+	}
+	listenCtx, cancelListen := context.WithCancel(context.Background())
+	listenerDone := make(chan struct{})
+	s.listenerDone = listenerDone
+	s.cancelListen = cancelListen
+	s.stopMu.Unlock()
+	defer cancelListen()
+
+	listen := s.listen
+	if listen == nil {
+		listen = (&net.ListenConfig{}).Listen
+	}
+	ln, err := listen(listenCtx, "tcp", s.httpServer.Addr)
+	s.stopMu.Lock()
+	stopping := s.stopDone != nil
+	if err != nil || stopping {
+		s.stopMu.Unlock()
+		if ln != nil {
+			err = errors.Join(err, ln.Close())
+		}
+		close(listenerDone)
+		if err != nil {
+			err = fmt.Errorf("listen on %s: %w", s.httpServer.Addr, err)
+		} else {
+			err = errors.New("server shut down during startup")
+		}
+		if stopping {
+			// Stop already owns finalization and may have returned its deadline.
+			// Closing listenerDone lets that same finalizer finish safely.
+			return err
+		}
+		return errors.Join(err, s.Stop(context.Background()))
 	}
 
 	boundAddr := ln.Addr().String()
 	s.boundAddr.Store(&boundAddr)
 	s.running.Store(true)
-	s.log.Info("vekil listening", logger.F("addr", s.listenerLogAddr(boundAddr)))
-
 	go func() {
+		defer close(listenerDone)
 		defer s.running.Store(false)
 		err := s.httpServer.Serve(ln)
 		if errors.Is(err, http.ErrServerClosed) {
@@ -529,6 +563,8 @@ func (s *Server) Start() error {
 		s.serveDone <- err
 		close(s.serveDone)
 	}()
+	s.stopMu.Unlock()
+	s.log.Info("vekil listening", logger.F("addr", s.listenerLogAddr(boundAddr)))
 
 	return nil
 }
@@ -618,9 +654,14 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 	done := make(chan struct{})
 	s.stopDone = done
+	cancelListen := s.cancelListen
+	listenerDone := s.listenerDone
 	s.stopMu.Unlock()
+	if cancelListen != nil {
+		cancelListen()
+	}
 
-	err := s.stop(ctx)
+	err := s.stop(ctx, listenerDone)
 	s.stopMu.Lock()
 	s.stopErr = err
 	close(done)
@@ -628,7 +669,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	return err
 }
 
-func (s *Server) stop(ctx context.Context) error {
+func (s *Server) stop(ctx context.Context, listenerDone <-chan struct{}) error {
 	var websocketErr error
 	var workerErr error
 	var forceCloseErr error
@@ -657,6 +698,11 @@ func (s *Server) stop(ctx context.Context) error {
 	// a deadline must not leak the store lock once all real work has finished.
 	finalized := make(chan error, 1)
 	go func() {
+		if listenerDone != nil {
+			// Also fence a late Listen result or a Serve goroutine not yet
+			// registered with net/http when Shutdown began.
+			<-listenerDone
+		}
 		s.requestHandlers.Wait()
 		var err error
 		if s.proxyHandler != nil {
