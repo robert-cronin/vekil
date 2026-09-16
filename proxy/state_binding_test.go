@@ -264,7 +264,7 @@ func TestStateBindingStoreResolveKnownTokensMustAgree(t *testing.T) {
 	}
 
 	requireStateBindingResult(t, store.resolve(tokens), stateBindingLookupKnown, owner)
-	requireStateBindingResult(t, store.resolveForRoute("route-a", tokens), stateBindingLookupKnown, owner)
+	requireStateBindingResult(t, store.resolveForRoute("route-a", "", tokens), stateBindingLookupKnown, owner)
 }
 
 func TestStateBindingStoreResolveFailsClosed(t *testing.T) {
@@ -348,7 +348,7 @@ func TestStateBindingStoreResolveForRouteRejectsCrossRouteOwnership(t *testing.T
 	owner := stateBindingOwner{routeID: "route-a", targetID: "target-1"}
 	store.bind(stateBindingTypeResponseID, "resp-1", owner)
 
-	requireStateBindingResult(t, store.resolveForRoute("route-b", []stateBindingToken{
+	requireStateBindingResult(t, store.resolveForRoute("route-b", "", []stateBindingToken{
 		{stateType: stateBindingTypeResponseID, value: "resp-1"},
 	}), stateBindingLookupConflict, stateBindingOwner{})
 }
@@ -516,8 +516,8 @@ func TestStateBindingStoreResolveMissingProofPrecedence(t *testing.T) {
 
 	for _, tokens := range [][]stateBindingToken{{a, missing}, {missing, a}} {
 		requireStateBindingResult(t, store.resolve(tokens), stateBindingLookupUnknown, stateBindingOwner{})
-		requireStateBindingResult(t, store.resolveForRoute("route-a", tokens), stateBindingLookupUnknown, stateBindingOwner{})
-		requireStateBindingResult(t, store.resolveForRoute("route-b", tokens), stateBindingLookupConflict, stateBindingOwner{})
+		requireStateBindingResult(t, store.resolveForRoute("route-a", "", tokens), stateBindingLookupUnknown, stateBindingOwner{})
+		requireStateBindingResult(t, store.resolveForRoute("route-b", "", tokens), stateBindingLookupConflict, stateBindingOwner{})
 	}
 	for _, tokens := range [][]stateBindingToken{
 		{a, b, missing}, {b, a, missing},
@@ -525,7 +525,7 @@ func TestStateBindingStoreResolveMissingProofPrecedence(t *testing.T) {
 		{missing, a, b}, {missing, b, a},
 	} {
 		requireStateBindingResult(t, store.resolve(tokens), stateBindingLookupConflict, stateBindingOwner{})
-		requireStateBindingResult(t, store.resolveForRoute("route-a", tokens), stateBindingLookupConflict, stateBindingOwner{})
+		requireStateBindingResult(t, store.resolveForRoute("route-a", "", tokens), stateBindingLookupConflict, stateBindingOwner{})
 	}
 
 	store.bind(a.stateType, a.value, ownerB) // A live conflict tombstone.
@@ -550,7 +550,7 @@ func TestStateBindingStoreResolvePartiallyLostProof(t *testing.T) {
 			}
 			store.bind(live.stateType, live.value, owner)
 			for _, tokens := range [][]stateBindingToken{{lost, live}, {live, lost}} {
-				requireStateBindingResult(t, store.resolveForRoute("route-a", tokens), stateBindingLookupUnknown, stateBindingOwner{})
+				requireStateBindingResult(t, store.resolveForRoute("route-a", "", tokens), stateBindingLookupUnknown, stateBindingOwner{})
 			}
 		})
 	}

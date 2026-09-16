@@ -50,7 +50,7 @@ func (h *ProxyHandler) applyExplicitRequestStateBinding(operation *routeOperatio
 			bootstrapOwner,
 		)
 	} else {
-		result = store.resolveForRoute(operation.route.public.routeID, tokens)
+		result = store.resolveForRoute(operation.route.public.routeID, operation.pinnedTarget(), tokens)
 	}
 	for count := uint64(0); count < evictions; count++ {
 		h.RecordStateBindingEviction()

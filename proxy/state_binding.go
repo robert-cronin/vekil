@@ -264,12 +264,12 @@ func (s *stateBindingStore) lookup(stateType stateBindingType, token string) sta
 // tombstone, malformed input, or differing known owners establishes conflict.
 // Neither unknown nor conflict permits an upstream call.
 func (s *stateBindingStore) resolve(tokens []stateBindingToken) stateBindingLookupResult {
-	return s.resolveWithRoute(tokens, "")
+	return s.resolveWithRoute(tokens, "", "")
 }
 
-// A non-empty routeID also treats any known cross-route owner as conflict,
-// even when another token is unknown.
-func (s *stateBindingStore) resolveWithRoute(tokens []stateBindingToken, routeID string) stateBindingLookupResult {
+// A non-empty routeID or pinnedTargetID also rejects known owners outside that
+// route or target, even when another token is unknown.
+func (s *stateBindingStore) resolveWithRoute(tokens []stateBindingToken, routeID, pinnedTargetID string) stateBindingLookupResult {
 	if len(tokens) == 0 || s == nil {
 		return stateBindingLookupResult{outcome: stateBindingLookupUnknown}
 	}
@@ -297,7 +297,8 @@ func (s *stateBindingStore) resolveWithRoute(tokens []stateBindingToken, routeID
 		case stateBindingLookupUnknown:
 			haveUnknown = true
 		case stateBindingLookupKnown:
-			if routeID != "" && result.owner.routeID != routeID {
+			if (routeID != "" && result.owner.routeID != routeID) ||
+				(pinnedTargetID != "" && result.owner.targetID != pinnedTargetID) {
 				return stateBindingLookupResult{outcome: stateBindingLookupConflict}
 			}
 			if !haveKnown {
@@ -319,10 +320,11 @@ func (s *stateBindingStore) resolveWithRoute(tokens []stateBindingToken, routeID
 	return stateBindingLookupResult{outcome: stateBindingLookupUnknown}
 }
 
-// resolveForRoute additionally rejects a token known to another public route.
-// A known result's targetID is the only target eligible for the operation.
-func (s *stateBindingStore) resolveForRoute(routeID string, tokens []stateBindingToken) stateBindingLookupResult {
-	result := s.resolveWithRoute(tokens, routeID)
+// resolveForRoute additionally rejects a token known to another public route
+// or a different target when the operation is already pinned. A known result's
+// targetID is the only target eligible for the operation.
+func (s *stateBindingStore) resolveForRoute(routeID, pinnedTargetID string, tokens []stateBindingToken) stateBindingLookupResult {
+	result := s.resolveWithRoute(tokens, routeID, pinnedTargetID)
 	if result.outcome != stateBindingLookupKnown {
 		return result
 	}

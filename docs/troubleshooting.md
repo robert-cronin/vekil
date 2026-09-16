@@ -18,7 +18,8 @@ The code does not identify why proof is missing. A binding may never have been
 observed here, or may have been lost through expiry, eviction, restart, or sending
 the request to another process. A proven owner disagreement, conflict tombstone,
 malformed value, or cross-route binding still fails with its existing validation
-error, even when other bindings are missing.
+error, even when other bindings are missing. A known owner that disagrees with an
+established WebSocket target pin also remains a conflict.
 
 If the original Vekil process still holds the bindings, restore request affinity
 to that process and keep the configured owner stable. Otherwise Vekil cannot

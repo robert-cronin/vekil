@@ -3,9 +3,11 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sozercan/vekil/logger"
@@ -178,6 +180,79 @@ func TestExplicitResponsesStateDiagnosticsWebSocket(t *testing.T) {
 			assertResponsesStateDiagnostic(t, raw, tc.wantCode, tc.wantDetail, true)
 			if primary.calls.Load() != 0 || secondary.calls.Load() != 0 {
 				t.Fatalf("rejection sent upstream: primary=%d secondary=%d", primary.calls.Load(), secondary.calls.Load())
+			}
+		})
+	}
+}
+
+func TestExplicitResponsesStateDiagnosticsPinnedWebSocket(t *testing.T) {
+	const unavailable = "provider_state_unavailable"
+	const missingDetail = "one or more state values have no live binding in this Vekil process"
+	const conflictDetail = "conflicting provider-bound state for explicit model route"
+	for _, tc := range []responsesStateDiagnosticCase{
+		{"conflicting owner", []string{"opaque-known-b"}, "", conflictDetail},
+		{"conflicting owner then missing", []string{"opaque-known-b", "opaque-missing"}, "", conflictDetail},
+		{"missing then conflicting owner", []string{"opaque-missing", "opaque-known-b"}, "", conflictDetail},
+		{"matching owner then missing", []string{"opaque-known-a", "opaque-missing"}, unavailable, missingDetail},
+		{"missing then matching owner", []string{"opaque-missing", "opaque-known-a"}, unavailable, missingDetail},
+		{"all missing", []string{"opaque-missing", "opaque-missing-b"}, unavailable, missingDetail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var primaryCalls, secondaryCalls atomic.Int32
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				primaryCalls.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_primary_pinned\",\"model\":\"physical-primary\"}}\n\n")
+				_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_primary_pinned\",\"model\":\"physical-primary\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n")
+			}))
+			defer primary.Close()
+			secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				secondaryCalls.Add(1)
+				http.Error(w, "unexpected secondary send", http.StatusInternalServerError)
+			}))
+			defer secondary.Close()
+			h := newExplicitRouteResponsesWebSocketHandler(t, primary.URL, secondary.URL)
+			route, known := h.resolveModelRouteForRequest("public-ws-model", providerEndpointResponses)
+			if !known || route == nil {
+				t.Fatal("explicit websocket route was not resolved")
+			}
+			bindExplicitEncryptedContentForTest(t, h, route, "primary", "opaque-known-a")
+			bindExplicitEncryptedContentForTest(t, h, route, "secondary", "opaque-known-b")
+			server := startResponsesWebSocketProxyServer(t, h)
+			conn := mustDialResponsesWebSocket(t, server, nil)
+			defer func() { _ = conn.Close() }()
+
+			first := newResponsesWebSocketCreateRequest([]any{})
+			first["model"] = "public-ws-model"
+			if err := conn.WriteJSON(first); err != nil {
+				t.Fatal(err)
+			}
+			if frame := mustReadWebSocketJSONSkipMetadata(t, conn); frame["type"] != "response.created" {
+				t.Fatalf("first created frame = %+v", frame)
+			}
+			if frame := mustReadWebSocketJSONSkipMetadata(t, conn); frame["type"] != "response.completed" {
+				t.Fatalf("first completed frame = %+v", frame)
+			}
+
+			input := make([]any, 0, len(tc.tokens))
+			for _, token := range tc.tokens {
+				input = append(input, map[string]any{"type": "reasoning", "encrypted_content": token})
+			}
+			// Omitting previous_response_id resets replay history, but the
+			// established WebSocket session remains pinned to primary.
+			second := newResponsesWebSocketCreateRequest(input)
+			second["model"] = "public-ws-model"
+			if err := conn.WriteJSON(second); err != nil {
+				t.Fatal(err)
+			}
+			frame := mustReadWebSocketJSON(t, conn)
+			raw, err := json.Marshal(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertResponsesStateDiagnostic(t, raw, tc.wantCode, tc.wantDetail, true)
+			if primaryCalls.Load() != 1 || secondaryCalls.Load() != 0 {
+				t.Fatalf("rejected turn sent upstream: primary=%d secondary=%d", primaryCalls.Load(), secondaryCalls.Load())
 			}
 		})
 	}
