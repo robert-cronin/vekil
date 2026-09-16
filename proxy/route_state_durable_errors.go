@@ -62,10 +62,8 @@ func durableResponsesErrorHeaderState(data []byte) ([]stateBindingToken, error) 
 func durableResponsesErrorHeaderPath(object map[string]json.RawMessage, path []string) ([]stateBindingToken, error) {
 	if len(path) == 0 {
 		headers := responsesStreamErrorHeaders(responsesWebSocketStreamError{Headers: object})
-		// Websocket error frames flatten multiple values into a joined string,
-		// which is not the original token even when all values are identical.
-		if len(headers.Values("X-Codex-Turn-State")) > 1 {
-			return nil, errors.New("multiple response error turn-state values")
+		if err := validateResponsesWebSocketTurnStateHeaders(headers); err != nil {
+			return nil, err
 		}
 		return explicitResponseHeaderStateTokens(headers)
 	}
@@ -90,6 +88,25 @@ func durableResponsesErrorHeaderPath(object map[string]json.RawMessage, path []s
 		tokens = append(tokens, values...)
 	}
 	return tokens, nil
+}
+
+// Websocket errors flatten header values into one string. Even identical or
+// empty repetitions would create a different token without ownership proof.
+func validateResponsesWebSocketTurnStateHeaders(headers http.Header) error {
+	if len(headers.Values("X-Codex-Turn-State")) > 1 {
+		return errors.New("multiple response error turn-state values")
+	}
+	return nil
+}
+
+func (h *ProxyHandler) bindDurableFinalWebSocketHeaders(info explicitRouteResponseInfo, headers http.Header) error {
+	if h == nil || h.stateBindings == nil || h.stateBindings.durable == nil {
+		return nil
+	}
+	if err := validateResponsesWebSocketTurnStateHeaders(headers); err != nil {
+		return err
+	}
+	return h.bindDurableFinalHeaders(info, headers)
 }
 
 // Bind only the final projection, using identity captured on its actual request.

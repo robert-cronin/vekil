@@ -1600,7 +1600,7 @@ func (s *responsesWebSocketSession) handleCreateRequest(h *ProxyHandler, request
 	// details. Keep its actual request identity, not a reconstructed target.
 	sendResponseError := func(status int, message, errType, code, param string, headers http.Header, usage responsesUsage) error {
 		if routeOperation != nil {
-			if stateErr := h.bindDurableFinalHeaders(responseInfo, headers); stateErr != nil {
+			if stateErr := h.bindDurableFinalWebSocketHeaders(responseInfo, headers); stateErr != nil {
 				status, message, errType, code, param, headers = http.StatusBadGateway, "failed to validate upstream response state", "server_error", "", "", nil
 				if storageMessage, storageCode, ok := durableStateFailureDetails(stateErr); ok {
 					status, message, code = http.StatusServiceUnavailable, storageMessage, storageCode
@@ -2542,6 +2542,13 @@ func (s *responsesWebSocketSession) streamUpstreamResponseWithRequest(h *ProxyHa
 		}
 		failureStatus := 0
 		if parsedEvent && (event.Type == "response.failed" || event.Type == "error") {
+			if h != nil && h.stateBindings != nil && h.stateBindings.durable != nil && upstreamRequest != nil && routeOperationFromContext(upstreamRequest.Context()) != nil {
+				// The event body has already passed durable validation, but its
+				// projected error can also inherit raw HTTP response headers.
+				if err := validateResponsesWebSocketTurnStateHeaders(responsesFailureHeaders(event, headers)); err != nil {
+					return err
+				}
+			}
 			if upstreamRequest != nil {
 				h.observeCopilotResponseFailure(upstreamRequest, event, responsesFailureHeaders(event, headers))
 			}

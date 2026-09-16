@@ -79,7 +79,10 @@ raw event or a projected websocket error can expose it.
 Single case-variant JSON error-envelope members accepted by websocket decoding
 are supported. Competing spellings such as `headers` and `Headers`, or multiple
 turn-state values that websocket projection would join, are rejected before
-exposure. HTTP header names retain their case-insensitive semantics.
+exposure. This also applies to repeated raw HTTP turn-state headers inherited
+by websocket errors, including errors after stream progress. Ordinary HTTP
+responses retain their repeated-identical-header semantics. HTTP header names
+retain their case-insensitive semantics.
 Durable JSON responses and stream events reject duplicate object keys before
 binding or forwarding, including escaped spellings of the same key. Reusing a
 key in distinct objects or inside a string is valid. Ambiguous events terminate
