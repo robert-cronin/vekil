@@ -72,10 +72,10 @@ func TestDurableStateStoreReopenWithoutExpiry(t *testing.T) {
 	if key != reopened.digestKey {
 		t.Fatal("store key changed across reopen")
 	}
-	if result := reopened.resolveForRoute(owner.routeID, tokens); result.err != nil || result.outcome != stateBindingLookupKnown || result.owner != reopened.durable.encodeOwner(owner) {
+	if result := reopened.resolveForRoute(owner.routeID, "", tokens); result.err != nil || result.outcome != stateBindingLookupKnown || result.owner != reopened.durable.encodeOwner(owner) {
 		t.Fatalf("reopen continuation = %+v", result)
 	}
-	if result := reopened.resolveForRoute("unrelated-route", tokens); result.outcome != stateBindingLookupConflict {
+	if result := reopened.resolveForRoute("unrelated-route", "", tokens); result.outcome != stateBindingLookupConflict {
 		t.Fatal("cross-route ownership accepted")
 	}
 	body, err := os.ReadFile(config.Path)

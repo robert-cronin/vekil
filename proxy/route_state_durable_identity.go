@@ -9,7 +9,7 @@ import (
 )
 
 func (h *ProxyHandler) applyDurableRequestStateBinding(store *stateBindingStore, operation *routeOperation, tokens []stateBindingToken) error {
-	result := store.resolveForRoute(operation.route.public.routeID, tokens)
+	result := store.resolveForRoute(operation.route.public.routeID, operation.pinnedTarget(), tokens)
 	if result.err != nil {
 		return &providerRequestError{statusCode: http.StatusServiceUnavailable, err: result.err}
 	}
@@ -48,7 +48,7 @@ func (h *ProxyHandler) applyDurableRequestStateBinding(store *stateBindingStore,
 	}
 	h.RecordStateBindingMiss()
 	if result.outcome == stateBindingLookupUnknown {
-		return &providerRequestError{statusCode: http.StatusBadRequest, err: errDurableStateUnknown}
+		return &providerRequestError{statusCode: http.StatusBadRequest, code: "provider_state_unavailable", err: errDurableStateUnknown}
 	}
 	return &providerRequestError{statusCode: http.StatusBadRequest, err: errDurableStateConflict}
 }

@@ -258,7 +258,7 @@ func (h *ProxyHandler) writeResponsesUpstreamRequestFailure(w http.ResponseWrite
 	statusCode := upstreamStatusCode(err, http.StatusBadGateway)
 	h.log.Error("upstream request failed", logger.F("endpoint", endpoint), logger.Err(err))
 	if statusCode == http.StatusBadRequest {
-		writeOpenAIError(w, statusCode, err.Error(), "invalid_request_error")
+		writeOpenAIErrorWithDetails(w, statusCode, err.Error(), "invalid_request_error", "", providerRequestErrorCode(err))
 		return
 	}
 	writeOpenAIUpstreamRequestFailure(w, statusCode, err)
@@ -746,7 +746,7 @@ func (h *ProxyHandler) HandleCompact(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			statusCode := upstreamStatusCode(err, http.StatusBadRequest)
-			writeOpenAIError(w, statusCode, err.Error(), "invalid_request_error")
+			writeOpenAIErrorWithDetails(w, statusCode, err.Error(), "invalid_request_error", "", providerRequestErrorCode(err))
 			return
 		}
 	}
@@ -880,7 +880,7 @@ func (h *ProxyHandler) HandleMemorySummarize(w http.ResponseWriter, r *http.Requ
 				return
 			}
 			statusCode := upstreamStatusCode(err, http.StatusBadRequest)
-			writeOpenAIError(w, statusCode, err.Error(), "invalid_request_error")
+			writeOpenAIErrorWithDetails(w, statusCode, err.Error(), "invalid_request_error", "", providerRequestErrorCode(err))
 			return
 		}
 	}

@@ -1666,6 +1666,9 @@ func (s *responsesWebSocketSession) handleCreateRequest(h *ProxyHandler, request
 		if status == http.StatusBadRequest {
 			code = "invalid_request_error"
 		}
+		if requestCode := providerRequestErrorCode(err); requestCode != "" {
+			code = requestCode
+		}
 		if writeErr := s.sendExplicitRouteError(routeOperation, status, fmt.Sprintf("upstream request failed: %v", err), code, nil); writeErr != nil {
 			return writeErr
 		}

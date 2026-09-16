@@ -59,7 +59,7 @@ func (h *ProxyHandler) applyExplicitRequestStateBinding(operation *routeOperatio
 			bootstrapOwner,
 		)
 	} else {
-		result = store.resolveForRoute(operation.route.public.routeID, tokens)
+		result = store.resolveForRoute(operation.route.public.routeID, operation.pinnedTarget(), tokens)
 	}
 	for count := uint64(0); count < evictions; count++ {
 		h.RecordStateBindingEviction()
@@ -82,7 +82,11 @@ func (h *ProxyHandler) applyExplicitRequestStateBinding(operation *routeOperatio
 		return nil
 	case stateBindingLookupUnknown:
 		h.RecordStateBindingMiss()
-		return &providerRequestError{statusCode: http.StatusBadRequest, err: fmt.Errorf("unknown provider-bound state for explicit model route; state may have expired, been evicted, or been issued by another Vekil process")}
+		return &providerRequestError{
+			statusCode: http.StatusBadRequest,
+			code:       "provider_state_unavailable",
+			err:        fmt.Errorf("unknown provider-bound state for explicit model route; one or more state values have no live binding in this Vekil process"),
+		}
 	default:
 		h.RecordStateBindingMiss()
 		return &providerRequestError{statusCode: http.StatusBadRequest, err: fmt.Errorf("conflicting provider-bound state for explicit model route")}

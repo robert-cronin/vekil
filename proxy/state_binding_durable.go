@@ -284,9 +284,20 @@ func (d *durableStateBindings) decode(key, value []byte) (stateBindingLookupResu
 }
 
 func (d *durableStateBindings) resolve(tokens []stateBindingToken) stateBindingLookupResult {
+	return d.resolveWithRoute(tokens, "", "")
+}
+
+func (d *durableStateBindings) resolveWithRoute(tokens []stateBindingToken, routeID, pinnedTargetID string) stateBindingLookupResult {
 	keys, err := d.tokenKeys(tokens)
 	if err != nil {
 		return stateBindingLookupResult{outcome: stateBindingLookupConflict}
+	}
+	var routeKey, targetKey [32]byte
+	if routeID != "" {
+		routeKey = d.digest("route", routeID)
+	}
+	if pinnedTargetID != "" {
+		targetKey = d.digest("target", pinnedTargetID)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -309,15 +320,19 @@ func (d *durableStateBindings) resolve(tokens []stateBindingToken) stateBindingL
 			if err != nil {
 				return err
 			}
-			if next.outcome == stateBindingLookupConflict || (known && next.owner != result.owner) {
+			// Check persisted keyed owners inside this same snapshot, before
+			// missing proof can erase a proven route/target disagreement.
+			if next.outcome == stateBindingLookupConflict ||
+				(routeID != "" && next.owner.routeKey != routeKey) ||
+				(pinnedTargetID != "" && next.owner.targetKey != targetKey) ||
+				(known && next.owner != result.owner) {
 				result = stateBindingLookupResult{outcome: stateBindingLookupConflict}
 				return nil
 			}
 			result, known = next, true
 		}
-		// Match memory-only classification; diagnostic changes are independent.
-		if known && unknown {
-			result = stateBindingLookupResult{outcome: stateBindingLookupConflict}
+		if unknown {
+			result = stateBindingLookupResult{outcome: stateBindingLookupUnknown}
 		}
 		return nil
 	})
