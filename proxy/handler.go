@@ -746,7 +746,10 @@ func (h *ProxyHandler) handleResponseBodyWriteError(w http.ResponseWriter, r *ht
 	if !bodyErr.upstream {
 		return true
 	}
-	if bodyErr.statusCode < http.StatusOK || bodyErr.statusCode >= http.StatusMultipleChoices {
+	durable := h.stateBindings != nil && h.stateBindings.durable != nil
+	if (bodyErr.statusCode < http.StatusOK || bodyErr.statusCode >= http.StatusMultipleChoices) && (bodyErr.committed || !durable) {
+		// Durable final-error writers validate before exposing headers. A local
+		// validation/read failure there still needs a visible terminal error.
 		return true
 	}
 	if bodyErr.cancellationAtFailure && h.ShuttingDown() && upstreamCtx != nil && errors.Is(context.Cause(upstreamCtx), errProxyLifecycleShutdown) {

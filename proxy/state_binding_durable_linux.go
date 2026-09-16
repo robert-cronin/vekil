@@ -14,6 +14,25 @@ import (
 )
 
 func openDurableStateDatabase(path string, allowCreate bool) (*bolt.DB, bool, func() error, error) {
+	return openDurableStateDatabaseWithFilesystemCheck(path, allowCreate, checkDurableStateFilesystem)
+}
+
+func checkDurableStateFilesystem(fd int) error {
+	var fs unix.Statfs_t
+	if unix.Fstatfs(fd, &fs) != nil {
+		return errDurableStatePath
+	}
+	switch fs.Type {
+	case unix.EXT4_SUPER_MAGIC, unix.XFS_SUPER_MAGIC, unix.BTRFS_SUPER_MAGIC, unix.TMPFS_MAGIC, unix.OVERLAYFS_SUPER_MAGIC:
+		return nil
+	default:
+		return errDurableStatePlatform
+	}
+}
+
+// Only the filesystem primitive is substituted in tests; descriptor opening,
+// identity checks, bbolt validation/locking and cleanup remain real.
+func openDurableStateDatabaseWithFilesystemCheck(path string, allowCreate bool, checkFilesystem func(int) error) (*bolt.DB, bool, func() error, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, false, nil, errDurableStatePath
 	}
@@ -37,14 +56,11 @@ func openDurableStateDatabase(path string, allowCreate bool) (*bolt.DB, bool, fu
 		return nil, false, nil, errDurableStatePath
 	}
 	var stat unix.Stat_t
-	var fs unix.Statfs_t
-	if unix.Fstat(int(directory.Fd()), &stat) != nil || stat.Uid != uint32(os.Geteuid()) || unix.Fstatfs(int(directory.Fd()), &fs) != nil {
+	if unix.Fstat(int(directory.Fd()), &stat) != nil || stat.Uid != uint32(os.Geteuid()) {
 		return nil, false, nil, errDurableStatePath
 	}
-	switch fs.Type {
-	case unix.EXT4_SUPER_MAGIC, unix.XFS_SUPER_MAGIC, unix.BTRFS_SUPER_MAGIC, unix.TMPFS_MAGIC, unix.OVERLAYFS_SUPER_MAGIC:
-	default:
-		return nil, false, nil, errDurableStatePlatform
+	if err := checkFilesystem(int(directory.Fd())); err != nil {
+		return nil, false, nil, err
 	}
 	name := filepath.Base(path)
 	before, err := root.Lstat(name)
@@ -72,6 +88,13 @@ func openDurableStateDatabase(path string, allowCreate bool) (*bolt.DB, bool, fu
 		if unix.Fstat(int(file.Fd()), &stat) != nil || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || stat.Mode&0o777 != 0o600 || stat.Mode&unix.S_IFMT != unix.S_IFREG {
 			_ = file.Close()
 			return nil, errDurableStatePath
+		}
+		// A regular file can be bind-mounted from a different filesystem than
+		// its containing directory. Validate each actual descriptor before bbolt
+		// can read pages or acquire a writable handle on unsupported storage.
+		if err := checkFilesystem(int(file.Fd())); err != nil {
+			_ = file.Close()
+			return nil, err
 		}
 		if !created {
 			after, err := file.Stat()
@@ -127,6 +150,8 @@ func durableDatabaseOpenError(err error) error {
 		return errDurableStateLocked
 	case errors.Is(err, errDurableStatePath), errors.Is(err, os.ErrPermission):
 		return errDurableStatePath
+	case errors.Is(err, errDurableStatePlatform):
+		return errDurableStatePlatform
 	case errors.Is(err, bolterrors.ErrInvalid), errors.Is(err, bolterrors.ErrVersionMismatch), errors.Is(err, bolterrors.ErrChecksum):
 		return errDurableStateCorrupt
 	default:

@@ -343,11 +343,16 @@ func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 			writeOpenAIUpstreamRequestFailure(w, statusCode, err)
 			return
 		}
-		// The compaction-trigger turn spends upstream /responses tokens across its
-		// internal compaction calls, but returns a synthetic response that bypasses
-		// the usage-observing passthrough below. Record the aggregate usage onto the
-		// inbound request summary so the dashboard does not count it as zero tokens.
+		if compactionResp != nil && compactionResp.Body != nil {
+			defer func() { _ = compactionResp.Body.Close() }()
+		}
+		// Record aggregate usage from internal compaction calls, including work
+		// preceding a terminal error. Success is synthetic, but a passthrough
+		// failure can expose provider state and needs the same durable guard.
 		observeResponsesUsage(r.Context(), compactionUsage)
+		if h.writeDurableShimPassthrough(w, r, upstreamCtx, compactionResp) {
+			return
+		}
 		if err := writeUpstreamResponse(w, compactionResp); err != nil {
 			h.log.Debug("failed to write compaction trigger response", logger.Err(err))
 		}

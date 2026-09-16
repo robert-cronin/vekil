@@ -104,10 +104,15 @@ func responsesLifecycleEventHasResponse(eventType string) bool {
 }
 
 func writeExplicitResponsesResponse(ctx context.Context, h *ProxyHandler, w http.ResponseWriter, resp *http.Response, info explicitRouteResponseInfo, store *ToolExecutionContextStore, scope string) error {
-	if resp == nil || resp.Body == nil {
+	durable := h != nil && h.stateBindings != nil && h.stateBindings.durable != nil
+	if resp == nil || (resp.Body == nil && !durable) {
 		return writeUpstreamResponse(w, resp)
 	}
-	body := newLifecycleAwareReadCloser(resp.Body, responseRequestContext(resp))
+	source := resp.Body
+	if source == nil {
+		source = http.NoBody
+	}
+	body := newLifecycleAwareReadCloser(source, responseRequestContext(resp))
 	defer func() { _ = body.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(body, maxLargeRequestBodySize+1))
@@ -124,13 +129,29 @@ func writeExplicitResponsesResponse(ctx context.Context, h *ProxyHandler, w http
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	if success {
 		observeResponsesUsage(ctx, sniffResponsesUsageBody(data))
-		bodyTokens, tokenErr := extractExplicitResponsesOutputState(data)
+	}
+	if success || durable {
+		// A final error is still an exposure boundary. Bind its structured state
+		// and headers atomically too; abandoned attempts never reach this writer.
+		var bodyTokens []stateBindingToken
+		var tokenErr error
+		emptyAllowed := durable && (!success || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent)
+		if len(data) != 0 || !emptyAllowed {
+			bodyTokens, tokenErr = extractExplicitResponsesOutputState(data)
+		}
 		headerTokens, headerErr := explicitResponseHeaderStateTokens(resp.Header)
 		if headerErr != nil {
 			return newResponseBodyWriteError(resp, headerErr, false, true, false)
 		}
 		if tokenErr != nil {
 			return newResponseBodyWriteError(resp, fmt.Errorf("malformed explicit route responses response: %w", tokenErr), false, true, false)
+		}
+		if durable && len(data) != 0 {
+			errorTokens, err := durableResponsesErrorHeaderState(data)
+			if err != nil {
+				return newResponseBodyWriteError(resp, fmt.Errorf("malformed explicit route responses error headers: %w", err), false, true, false)
+			}
+			bodyTokens = append(bodyTokens, errorTokens...)
 		}
 		allTokens := append(headerTokens, bodyTokens...)
 		if bindErr := h.bindExplicitStateTokens(info, allTokens); bindErr != nil {
@@ -315,6 +336,13 @@ func normalizeResponsesStreamBodyWithBinding(h *ProxyHandler, source io.ReadClos
 			// malformed events must remain transparent instead of terminating the
 			// downstream pipe; only successfully extracted state is bindable.
 			return nil
+		}
+		if h != nil && h.stateBindings != nil && h.stateBindings.durable != nil {
+			errorTokens, err := durableResponsesErrorHeaderState(data)
+			if err != nil {
+				return fmt.Errorf("malformed explicit route responses error headers")
+			}
+			tokens = append(tokens, errorTokens...)
 		}
 		return h.bindExplicitStateTokens(info, tokens)
 	})

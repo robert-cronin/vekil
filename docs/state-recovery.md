@@ -28,7 +28,10 @@ XFS, btrfs, tmpfs, and overlay; network/shared filesystems are rejected. A tmpfs
 store survives process restart, **not reboot**. Container-layer/ephemeral-volume
 replacement also loses its store. Use a persistent local volume for host or
 container lifecycle continuity. The file and its containing directory must be
-private and owned by the service user; symlink files/directories, non-regular
+private and owned by the service user. The filesystem check uses the actual
+opened directory and store-file descriptors, including both the read-only probe
+and writable open; a file mounted from unsupported storage is also rejected.
+Symlink files/directories, non-regular
 files, and hard-linked store files are rejected.
 
 Only one process may open a store. A second writer fails startup, including an
@@ -50,6 +53,23 @@ content, conversation ownership, or `X-Codex-Turn-State`, Vekil commits exact
 ownership proof. JSON batches and state-bearing stream events are all-or-nothing.
 Repeated proof for the same owner needs no new write. Hidden state discarded from
 a failed route attempt or a normal compact/memory summary is not persisted.
+Final error responses, including passthrough compaction-trigger failures, are
+also exposure boundaries: their structured JSON state
+and headers are committed before passthrough, preserving the upstream status.
+Empty final-error bodies may carry bound headers. Nonempty malformed or
+non-object JSON is withheld with a visible `502`; storage faults still use
+`503`. Only the error actually returned to the client is bound, not errors
+discarded during failover. Usage recording and tool optimization remain
+success-only.
+Native Chat and direct Anthropic final passthrough errors also bind supported
+turn-state headers; their bodies are not parsed as Responses objects. Websocket
+error frames bind their final projected turn-state headers using the captured
+request owner, including translated precommit errors. They retain structured
+error messages/codes, but durable mode replaces raw-body message fallback with
+bounded HTTP status text so discarded body state cannot escape inside a string.
+Durable Responses failure events also commit turn state carried in root or
+nested error headers atomically with the event's body state, before either the
+raw event or a projected websocket error can expose it.
 
 Ownership includes route/target/provider identity, the effective endpoint and
 query, physical model/deployment, and authenticated account/tenant scope from

@@ -4,14 +4,86 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
-// Normal shim success emits only proxy-owned summaries. An unusual non-200
-// successful response is a passthrough and must bind any opaque state first.
+// Failure events can expose turn state inside root or nested error headers,
+// including the headers later projected into websocket error frames. Inspect
+// every raw representation, not just the winning overlay, before emitting it.
+func durableResponsesErrorHeaderState(data []byte) ([]stateBindingToken, error) {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, err
+	}
+	switch strings.TrimSpace(envelope.Type) {
+	case "", "error", "response.failed":
+	default:
+		return nil, nil
+	}
+	type headerBlock struct {
+		Headers map[string]json.RawMessage `json:"headers"`
+	}
+	var event struct {
+		Headers  map[string]json.RawMessage `json:"headers"`
+		Error    headerBlock                `json:"error"`
+		Response struct {
+			Error headerBlock `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil {
+		return nil, err
+	}
+	var tokens []stateBindingToken
+	for _, rawHeaders := range []map[string]json.RawMessage{event.Headers, event.Error.Headers, event.Response.Error.Headers} {
+		headers := responsesStreamErrorHeaders(responsesWebSocketStreamError{Headers: rawHeaders})
+		values, err := explicitResponseHeaderStateTokens(headers)
+		if err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, values...)
+	}
+	return tokens, nil
+}
+
+// Bind only the final projection, using identity captured on its actual request.
+// Native Chat/Messages bodies are not Responses state and are never parsed here.
+func (h *ProxyHandler) bindDurableFinalHeaders(info explicitRouteResponseInfo, headers http.Header) error {
+	if h == nil || h.stateBindings == nil || h.stateBindings.durable == nil {
+		return nil
+	}
+	tokens, err := explicitResponseHeaderStateTokens(headers)
+	if err != nil || len(tokens) == 0 {
+		return err
+	}
+	if info.stateIdentity == [32]byte{} {
+		return fmt.Errorf("final response is missing authenticated state ownership")
+	}
+	return h.bindExplicitStateTokens(info, tokens)
+}
+
+func (h *ProxyHandler) prepareDurableFinalResponseHeaders(resp *http.Response) error {
+	info, ok := explicitRouteResponseInfoFromResponse(resp)
+	if !ok {
+		return nil // legacy or synthetic response, not an explicit provider result
+	}
+	if err := h.bindDurableFinalHeaders(info, resp.Header); err != nil {
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return newResponseBodyWriteError(resp, err, false, true, false)
+	}
+	return nil
+}
+
+// Normal shim success emits only proxy-owned summaries. Every passthrough,
+// including a final error, must bind any exposed opaque state first.
 func (h *ProxyHandler) writeDurableShimPassthrough(w http.ResponseWriter, r *http.Request, upstreamCtx context.Context, resp *http.Response) bool {
-	if h.stateBindings == nil || h.stateBindings.durable == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if h.stateBindings == nil || h.stateBindings.durable == nil {
 		return false
 	}
 	info, ok := explicitRouteResponseInfoFromResponse(resp)
