@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -240,6 +241,33 @@ func TestDurableStateProcessCrashReopen(t *testing.T) {
 				t.Fatal("reopened continuation switched issuer or retried")
 			}
 			killDurableProcess(t, restarted)
+			beforePrune, err := os.ReadFile(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pruneCtx, pruneCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer pruneCancel()
+			prune := exec.CommandContext(pruneCtx, binary, "state", "prune", "--file", store, "--before", "2020-01-01T00:00:00.500Z", "--confirm")
+			prune.Env = durableProcessEnvironment()
+			out, err = prune.CombinedOutput()
+			if err == nil || prune.ProcessState == nil || prune.ProcessState.ExitCode() != 2 || !strings.Contains(string(out), "whole-second") {
+				t.Fatalf("fractional prune was not rejected: %v %s", err, out)
+			}
+			afterPrune, err := os.ReadFile(store)
+			if err != nil || !bytes.Equal(beforePrune, afterPrune) {
+				t.Fatalf("invalid CLI prune changed the store: %v", err)
+			}
+			prune = exec.CommandContext(pruneCtx, binary, "state", "prune", "--file", store, "--before", "2020-01-01T00:00:00Z", "--confirm")
+			prune.Env = durableProcessEnvironment()
+			if out, err := prune.CombinedOutput(); err != nil || !strings.Contains(string(out), "Pruned 0 ownership records") {
+				t.Fatalf("whole-second CLI prune: %v %s", err, out)
+			}
+			afterPruning := startDurableProcess(t, binary, config, store, tokenDir)
+			continued = request(afterPruning.url, fmt.Sprintf(`{"model":"public-fixture","stream":%t,"previous_response_id":"resp-process-fixture","input":[{"type":"reasoning","encrypted_content":"encrypted-process-fixture","summary":[]},{"role":"user","content":"continue"}]}`, stream), true)
+			if !strings.Contains(continued, "encrypted-process-fixture") || primaryCalls.Load() != beforePrimary || secondaryCalls.Load() != beforeSecondary+2 {
+				t.Fatal("CLI pruning lost retained proof or changed its exact issuer")
+			}
+			killDurableProcess(t, afterPruning)
 		})
 	}
 }

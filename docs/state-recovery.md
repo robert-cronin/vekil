@@ -96,8 +96,12 @@ vekil state prune --file /path/to/private-state/bindings.db \
   --before 2026-01-01T00:00:00Z --confirm
 ```
 
-The cutoff must be in the past. Records issued before it (or subsequently marked
-conflicting before it) are deleted atomically; repeated same-owner observations
+The cutoff must be in the past and on a whole-second boundary, matching the
+store's timestamp precision. Omit the fractional-second component in CLI input;
+the pruning API rejects cutoffs with nonzero nanoseconds. Both validate before
+opening the store. Records from the cutoff second are retained.
+Records issued before it (or subsequently marked conflicting before it) are
+deleted atomically; repeated same-owner observations
 do not refresh issuance time. Pruned opaque state becomes unknown. Conversation-
 only IDs retain their narrow deterministic first-use bootstrap rule, so pruning
 their proof removes Vekil's ability to distinguish old use from first use.

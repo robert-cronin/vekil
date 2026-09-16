@@ -18,7 +18,20 @@ func (h *ProxyHandler) writeDurableShimPassthrough(w http.ResponseWriter, r *htt
 	if !ok {
 		return false
 	}
-	if err := writeExplicitResponsesResponse(r.Context(), h, w, resp, info, nil, ""); err != nil {
+	var err error
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
+		// These successes cannot carry content, but their headers may still
+		// expose provider state. Commit that proof before writing any headers.
+		if err = h.bindExplicitResponseHeaders(info, resp.Header); err == nil {
+			copyPassthroughHeaders(w.Header(), resp.Header)
+			w.WriteHeader(resp.StatusCode)
+			return true
+		}
+		err = newResponseBodyWriteError(resp, err, false, true, false)
+	} else {
+		err = writeExplicitResponsesResponse(r.Context(), h, w, resp, info, nil, "")
+	}
+	if err != nil {
 		if !h.handleResponseBodyWriteError(w, r, upstreamCtx, "responses_shim", err) {
 			writeOpenAIError(w, http.StatusBadGateway, "failed to validate upstream response state", "server_error")
 		}

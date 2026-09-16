@@ -302,6 +302,68 @@ func TestDurableStateStoreExplicitPruning(t *testing.T) {
 	}
 }
 
+func TestDurableStateStorePruningWholeSecondBoundary(t *testing.T) {
+	s, config := newDurableStoreFixture(t, 4)
+	boundary := time.Date(2020, 1, 1, 0, 0, 1, 0, time.UTC)
+	owner := durableFixtureOwner()
+	for _, fixture := range []struct {
+		token string
+		at    time.Time
+	}{
+		{"before-second", boundary.Add(-time.Nanosecond)},
+		{"at-second", boundary},
+		{"after-second", boundary.Add(900 * time.Millisecond)},
+		{"conflict-after-second", boundary.Add(900 * time.Millisecond)},
+	} {
+		s.durable.now = func() time.Time { return fixture.at }
+		tokens := []stateBindingToken{{stateBindingTypeResponseID, fixture.token}}
+		if r := s.bindAll(tokens, owner); r.err != nil {
+			t.Fatal(r.err)
+		}
+		if fixture.token == "conflict-after-second" {
+			other := owner
+			other.targetID = "other-target"
+			if r := s.bindAll(tokens, other); r.err != nil || r.outcome != stateBindingLookupConflict {
+				t.Fatalf("tombstone = %+v", r)
+			}
+		}
+	}
+	closeDurableStoreFixture(t, s)
+	original, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fraction := range []time.Duration{time.Nanosecond, 500 * time.Millisecond, time.Second - time.Nanosecond} {
+		if n, err := PruneDurableStateBindings(config.Path, boundary.Add(fraction)); n != 0 || !errors.Is(err, errDurableStateConfig) {
+			t.Fatalf("fractional cutoff %s: removed=%d err=%v", fraction, n, err)
+		}
+		unchanged, err := os.ReadFile(config.Path)
+		if err != nil || !bytes.Equal(original, unchanged) {
+			t.Fatalf("rejected prune changed database: %v", err)
+		}
+	}
+	if n, err := PruneDurableStateBindings(config.Path, boundary); n != 1 || err != nil {
+		t.Fatalf("whole-second cutoff: removed=%d err=%v", n, err)
+	}
+	reopened, err := newDurableStateBindingStore(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeDurableStoreFixture(t, reopened)
+	for token, want := range map[string]stateBindingLookupOutcome{
+		"before-second": stateBindingLookupUnknown, "at-second": stateBindingLookupKnown,
+		"after-second": stateBindingLookupKnown, "conflict-after-second": stateBindingLookupConflict,
+	} {
+		if got := reopened.lookup(stateBindingTypeResponseID, token); got.err != nil || got.outcome != want {
+			t.Fatalf("retained boundary %s: %+v, want %v", token, got, want)
+		}
+	}
+	closeDurableStoreFixture(t, reopened)
+	if n, err := PruneDurableStateBindings(config.Path, boundary.Add(time.Second)); n != 3 || err != nil {
+		t.Fatalf("next whole second: removed=%d err=%v", n, err)
+	}
+}
+
 func TestDurableStateStoreInvalidFilesPreserved(t *testing.T) {
 	for _, damage := range []string{"empty", "truncated", "random", "foreign"} {
 		t.Run(damage, func(t *testing.T) {

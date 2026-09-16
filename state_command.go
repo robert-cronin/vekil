@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/sozercan/vekil/proxy"
@@ -17,7 +18,7 @@ func runState(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("state prune", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	path := fs.String("file", "", "Existing private durable state file; serving must be stopped")
-	cutoff := fs.String("before", "", "Retire records issued before this RFC3339 timestamp")
+	cutoff := fs.String("before", "", "Retire records issued before this whole-second RFC3339 timestamp")
 	confirm := fs.Bool("confirm", false, "Acknowledge that affected continuations will fail after pruning")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -26,8 +27,10 @@ func runState(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	before, err := time.Parse(time.RFC3339, *cutoff)
-	if err != nil || *path == "" || !*confirm || fs.NArg() != 0 || before.Unix() <= 0 || before.After(time.Now()) {
-		_, _ = fmt.Fprintln(stderr, "pruning requires --file, a past --before RFC3339 timestamp, and --confirm; affected continuation state will become unknown")
+	// Reject fractional syntax before Go's parser can silently truncate digits
+	// beyond nanosecond precision. The store records issuance in whole seconds.
+	if err != nil || *path == "" || !*confirm || fs.NArg() != 0 || strings.ContainsAny(*cutoff, ".,") || before.Unix() <= 0 || before.After(time.Now()) {
+		_, _ = fmt.Fprintln(stderr, "pruning requires --file, a past whole-second --before RFC3339 timestamp, and --confirm; affected continuation state will become unknown")
 		return 2
 	}
 	removed, err := proxy.PruneDurableStateBindings(*path, before)

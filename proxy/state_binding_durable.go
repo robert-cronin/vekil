@@ -96,8 +96,9 @@ func openDurableStateBindingStore(config DurableStateBindingsConfig, allowCreate
 // conflicting) before the cutoff. It takes the same exclusive process lock as
 // serving, never creates a missing store, and does not shrink the database file.
 // Pruned continuation state becomes unknown. No credentials/providers are loaded.
+// The cutoff must be a whole second, matching the persisted issuance precision.
 func PruneDurableStateBindings(path string, before time.Time) (removed int, err error) {
-	if before.IsZero() || before.Unix() <= 0 || before.After(time.Now()) {
+	if before.IsZero() || before.Unix() <= 0 || before.Nanosecond() != 0 || before.After(time.Now()) {
 		return 0, errDurableStateConfig
 	}
 	s, err := openDurableStateBindingStore(DurableStateBindingsConfig{Path: path, MaxEntries: math.MaxInt}, false)
