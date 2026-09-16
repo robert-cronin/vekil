@@ -15,10 +15,11 @@ import (
 )
 
 type explicitRouteResponseInfo struct {
-	routeID    string
-	publicID   string
-	targetID   string
-	providerID string
+	routeID       string
+	publicID      string
+	targetID      string
+	providerID    string
+	stateIdentity [32]byte
 }
 
 type explicitRouteResponseContextKey struct{}
@@ -305,6 +306,11 @@ func normalizeResponsesStreamBodyWithBinding(h *ProxyHandler, source io.ReadClos
 	return normalizeResponsesStreamBody(source, info.publicID, func(data []byte) error {
 		tokens, err := extractExplicitResponsesOutputState(data)
 		if err != nil {
+			if h != nil && h.stateBindings != nil && h.stateBindings.durable != nil {
+				// A malformed state-bearing event cannot establish durable proof.
+				// Keep memory-only compatibility, but never expose it in this mode.
+				return fmt.Errorf("malformed explicit route responses state")
+			}
 			// Streaming headers are already committed. Vendor extensions and
 			// malformed events must remain transparent instead of terminating the
 			// downstream pipe; only successfully extracted state is bindable.

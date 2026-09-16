@@ -48,6 +48,9 @@ func upstreamErrorRetryMetadata(err error) (string, http.Header) {
 }
 
 func writeOpenAIUpstreamRequestFailure(w http.ResponseWriter, statusCode int, err error) {
+	if writeDurableStateFailure(w, err) {
+		return
+	}
 	retryAfter, upstreamHeaders := upstreamErrorRetryMetadata(err)
 	writeOpenAIErrorWithRetryAfter(
 		w,

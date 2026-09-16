@@ -1626,6 +1626,16 @@ func (s *responsesWebSocketSession) handleCreateRequest(h *ProxyHandler, request
 			recordDisconnected(0, responsesUsage{}, s.clientClosePrecedesShutdown(h))
 			return err
 		}
+		if message, code, ok := durableStateFailureDetails(err); ok {
+			recordTurn(http.StatusServiceUnavailable, responsesUsage{})
+			if s.isClosing() || h.upstreamShutdownStarted() {
+				return err
+			}
+			if writeErr := s.sendExplicitRouteErrorDetails(routeOperation, http.StatusServiceUnavailable, message, "server_error", code, "", nil); writeErr != nil {
+				return writeErr
+			}
+			return err
+		}
 		status := upstreamStatusCode(err, http.StatusBadGateway)
 		if status == http.StatusBadGateway && errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
@@ -1753,6 +1763,16 @@ func (s *responsesWebSocketSession) handleCreateRequest(h *ProxyHandler, request
 			// Parsed response.failed and top-level error events account themselves before
 			// client delivery, so the outer handler must not record them again.
 			return nil
+		}
+		if message, code, ok := durableStateFailureDetails(err); ok {
+			recordTurn(http.StatusServiceUnavailable, streamResult.usage)
+			if s.isClosing() || h.upstreamShutdownStarted() {
+				return err
+			}
+			if writeErr := s.sendExplicitRouteErrorDetails(routeOperation, http.StatusServiceUnavailable, message, "server_error", code, "", nil); writeErr != nil {
+				return writeErr
+			}
+			return err
 		}
 		if lifecycleBody != nil && lifecycleBody.canceledAtFailure() && errors.Is(context.Cause(upstreamCtx), errProxyLifecycleShutdown) {
 			return err

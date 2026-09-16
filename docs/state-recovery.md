@@ -1,0 +1,127 @@
+# Durable Provider-State Recovery
+
+For explicit schema-v2 routes, Vekil can retain provider-state ownership across
+a process restart. Enable this **before** issuing state that must survive. It
+cannot reconstruct bindings already lost through restart, expiry, or eviction.
+Memory-only operation remains the default.
+
+## Enable one local writer
+
+Create a private directory owned by the Vekil service user with mode `0700`, on
+a supported local filesystem, then start Vekil with an absolute, clean path:
+
+```bash
+vekil --providers-config /path/to/providers.yaml \
+  --state-bindings-file /path/to/private-state/bindings.db \
+  --state-bindings-max-entries 262144
+```
+
+The corresponding environment variables are `STATE_BINDINGS_FILE` and
+`STATE_BINDINGS_MAX_ENTRIES`. An omitted/zero entry limit means 262,144. A limit
+without a file, or a negative limit, is invalid. A missing file is created with
+mode `0600`; an existing empty, corrupt, incompatible, unsafe, or locked file
+is rejected rather than replaced. Vekil validates the store before listening.
+No runtime activation or migration of a memory-only index is performed.
+
+Durable mode currently supports Linux only. The filesystem allowlist is ext4,
+XFS, btrfs, tmpfs, and overlay; network/shared filesystems are rejected. A tmpfs
+store survives process restart, **not reboot**. Container-layer/ephemeral-volume
+replacement also loses its store. Use a persistent local volume for host or
+container lifecycle continuity. The file and its containing directory must be
+private and owned by the service user; symlink files/directories, non-regular
+files, and hard-linked store files are rejected.
+
+Only one process may open a store. A second writer fails startup, including an
+offline pruning command while the service owns the file. Do not copy an active
+store to give several replicas independent writable copies. This is not shared
+storage, cross-host failover, or a replacement for ingress affinity. Shutdown
+retains the lock until a successful drain; an incomplete drain does not admit a
+replacement writer while the old process can still write.
+
+## What is recovered
+
+Before exposing provider-issued response IDs, encrypted reasoning/compaction
+content, conversation ownership, or `X-Codex-Turn-State`, Vekil commits exact
+ownership proof. JSON batches and state-bearing stream events are all-or-nothing.
+Repeated proof for the same owner needs no new write. Hidden state discarded from
+a failed route attempt or a normal compact/memory summary is not persisted.
+
+Ownership includes route/target/provider identity, the effective endpoint and
+query, physical model/deployment, and authenticated account/tenant scope from
+the **actual outbound request**. Reusing configuration labels does not authorize
+another owner. Changed endpoints, deployments, API keys, tenant headers, or
+principals reject retained state before inference; Vekil never guesses a target
+or silently drops context to recover. Copilot service-token refresh preserves
+ownership when its source-credential fingerprint is stable. Legacy caches
+without that provenance cannot promise refresh continuity. Entra requires
+issuer, tenant and object identity from its acquired token; token scope is also
+bound. Malformed or unavailable principal evidence fails before dispatch.
+
+The provider/endpoint support matrix is unchanged. In particular, this does not
+enable `openai-codex` as an explicit schema-v2 target. Codex **clients** using
+supported explicit Responses routes benefit from the store. Legacy/zero-config
+provider routes retain their existing behavior.
+
+The file contains a versioned key, typed keyed token digests, keyed owner
+fingerprints, issuance timestamps, and conflict tombstones—not raw continuation
+tokens, conversations, account IDs, or credentials. It is not an encrypted
+conversation backup. Keep the file private: its integrity key is in the same
+file and does not defend against a malicious writer with the service user's
+filesystem access. Preserve the complete file for an offline backup, including
+its key and tombstones. Restoring an older backup loses proof issued afterward.
+
+Websocket connection history and upstream connections are **not** recovered.
+After reconnect, resend full client-held input without an old connection-local
+`previous_response_id`; retained encrypted input is still checked against its
+durable owner. HTTP `previous_response_id` retains its usual provider contract.
+Provider-side expiry/deletion may still reject state whose local ownership is
+known. Responses-backed Chat tool replay remains a separate process-local
+store; this feature does not persist it or migrate state across targets.
+
+## Retention, capacity and explicit pruning
+
+Durable records never expire or evict automatically. The configured limit counts
+logical fixed-size records, **including tombstones**, not physical file bytes.
+At capacity, existing proof remains usable and existing tokens can still be
+marked conflicting. A batch requiring new records fails without partial
+insertion or exposure. Increase the limit on restart or deliberately retire old
+proof offline. bbolt pages, freelists and copy-on-write overhead require extra
+disk space; pruning reuses pages but does not shrink the file.
+
+Pruning is continuity-breaking. Stop and drain the owning service, preserve a
+backup, choose the cutoff deliberately, then explicitly confirm:
+
+```bash
+vekil state prune --file /path/to/private-state/bindings.db \
+  --before 2026-01-01T00:00:00Z --confirm
+```
+
+The cutoff must be in the past. Records issued before it (or subsequently marked
+conflicting before it) are deleted atomically; repeated same-owner observations
+do not refresh issuance time. Pruned opaque state becomes unknown. Conversation-
+only IDs retain their narrow deterministic first-use bootstrap rule, so pruning
+their proof removes Vekil's ability to distinguish old use from first use.
+No provider credentials are loaded and no inference is performed by pruning.
+
+## Failures and rollback
+
+Capacity failures use HTTP `503`, code `state_binding_capacity_exceeded`.
+Storage failures use `503`, code `state_binding_storage_unavailable`; after
+streaming starts, a bounded SSE or websocket error terminates the turn before
+unrecorded state is exposed. The failing process freezes use of an uncertain
+store until operator repair and reopen. A storage failure after inference never
+authorizes Vekil to retry that inference or switch targets. Previously exposed,
+committed state remains recorded even when a later event fails.
+
+These are local infrastructure failures, not model safety decisions or native
+tool-approval verdicts. Do not bypass approvals or replay a refused tool to test
+recovery. Preserve the store, check permissions/free space/ownership, resolve the
+storage fault, and reopen the same file and owner configuration. Never delete or
+reinitialize it merely to silence the error.
+
+Removing the flag returns to an empty memory-only index and loses access to
+durable proof. Downgrading to a binary that cannot read this format has the same
+continuity cost. Fence and drain stateful traffic before such a rollback; the
+memory-only 24-hour TTL is **not** a retirement period for durable records.
+Ordinary restart with the same supported binary, complete store and exact owner
+configuration preserves proof but still requires clients to reconnect.

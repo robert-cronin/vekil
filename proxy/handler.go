@@ -307,6 +307,7 @@ type ProxyHandler struct {
 	stateBindingsOnce                sync.Once
 	stateBindings                    *stateBindingStore
 	stateBindingsErr                 error
+	durableStateConfig               DurableStateBindingsConfig
 	insightGate                      *insightGate
 	insightGateOnce                  sync.Once
 }
@@ -685,6 +686,7 @@ func (h *ProxyHandler) WaitLifecycleWorkers(ctx context.Context) (err error) {
 	defer func() {
 		if err == nil && h.ShuttingDown() && (ctx == nil || ctx.Err() == nil) {
 			h.closeResponsesChatReplayStore()
+			err = h.stateBindings.close()
 		}
 	}()
 	h.lifecycleWorkersMu.Lock()
@@ -731,6 +733,15 @@ func (h *ProxyHandler) handleResponseBodyWriteError(w http.ResponseWriter, r *ht
 	var bodyErr *responseBodyWriteError
 	if !errors.As(err, &bodyErr) {
 		return false
+	}
+	if _, _, ok := durableStateFailureDetails(err); ok {
+		if r != nil {
+			observeResponseFailureStatus(r.Context(), http.StatusServiceUnavailable)
+		}
+		if !bodyErr.committed {
+			writeDurableStateFailure(w, err)
+		}
+		return true
 	}
 	if !bodyErr.upstream {
 		return true
@@ -1071,6 +1082,12 @@ func NewProxyHandler(a *auth.Authenticator, log *logger.Logger, opts ...Option) 
 		stats:                           newStatsCollector(),
 	}
 	h.initializeLifecycle()
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = h.stateBindings.close()
+		}
+	}()
 	for _, opt := range opts {
 		if opt != nil {
 			opt(h)
@@ -1100,6 +1117,7 @@ func NewProxyHandler(a *auth.Authenticator, log *logger.Logger, opts ...Option) 
 		h.policyPreflightPending.Store(controller.Active())
 	}
 	h.validateInsightModel()
+	initialized = true
 	return h, nil
 }
 

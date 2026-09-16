@@ -405,7 +405,10 @@ func New(authenticator *auth.Authenticator, log *logger.Logger, host, port strin
 		return nil, err
 	}
 	if err := validatePolicyRoutingListenHost(host, handler.PolicyRoutingActive(), cfg.policyRoutingAllowRemoteSingleTenant); err != nil {
-		return nil, err
+		// Nothing has been served yet, but construction may already own durable
+		// storage and lifecycle resources. Drain before releasing the store lock.
+		handler.BeginShutdown()
+		return nil, errors.Join(err, handler.WaitLifecycleWorkers(context.Background()))
 	}
 
 	mux := http.NewServeMux()
