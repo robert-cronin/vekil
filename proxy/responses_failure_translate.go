@@ -1372,7 +1372,7 @@ func inspectResponsesPeekMessages(parser *responsesSSEParser, headers http.Heade
 		classified := classifyResponsesPeekMessage(msg, headers)
 		unsafeBeforeMessage := parser.sawUnsafeProgress
 		if classified.failure != nil && !unsafeBeforeMessage && !classified.eventOutputProgress && !classified.eventUsageProgress {
-			classified.precommitReplaySafe = true
+			classified.precommitReplaySafe = routeResponseBodyAllowsReplay([]byte(msg.data))
 		}
 		if classified.eventOutputProgress || classified.eventUsageProgress {
 			// Output and usage on any parsed event, including a nominal preamble,
@@ -1501,6 +1501,11 @@ func writePrefixAndDrainResponsesStream(pw *io.PipeWriter, prefix []byte, chunkC
 }
 
 func classifyResponsesPeekMessage(msg responsesSSEMessage, headers http.Header) peekResult {
+	// Decoding can overwrite earlier usage or output under duplicate keys.
+	// Preserve ambiguous raw events and prevent them from authorizing replay.
+	if rejectDuplicateJSONMappingKeys([]byte(msg.data)) != nil {
+		return peekResult{decision: responsesPeekDecisionPassthrough}
+	}
 	event, err := parseResponsesStreamEvent(msg.data)
 	if err != nil {
 		return peekResult{decision: responsesPeekDecisionPassthrough}
