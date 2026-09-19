@@ -108,7 +108,7 @@ jobs:
       - name: Test legacy JSON response validation
         env:
           GOEXPERIMENT: nojsonv2
-        run: go test ./proxy -run '^TestDurableResponses(JSONDepthLimit|StateFieldAliases|IDAliasesExposureAndContinuation)' -count=1
+        run: go test ./proxy -run '^TestDurableResponses(JSONDepthLimit|StateFieldAliases|IDAliasesExposureAndContinuation|RequestStateAliases)' -count=1
 
   build:
     runs-on: ubuntu-latest

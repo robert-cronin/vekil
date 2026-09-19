@@ -134,6 +134,14 @@ legacy Go JSON decoder. Reusing a key in distinct objects or inside a string is
 valid. Ambiguous events terminate the stream without exposing or recording
 their state; memory-only passthrough is unchanged.
 
+Durable HTTP Responses and compact requests require canonical JSON names for
+`previous_response_id`, `conversation` and its `id`, `input`, input-item `type`,
+and `encrypted_content` in reasoning/compaction items. Case variants, competing
+spellings, and duplicate keys return `400` before any provider send. The
+WebSocket bridge checks the same state paths after its existing envelope
+normalization. Vendor metadata and message text are not interpreted as ownership
+fields. Memory and legacy request behavior is unchanged.
+
 Ownership includes route/target/provider identity, the effective endpoint and
 query, physical model/deployment, and authenticated account/tenant scope from
 the **actual outbound request**. Reusing configuration labels does not authorize

@@ -95,7 +95,10 @@ refusal, constructor/drain locks, JSON/SSE and HTTP/native-websocket exposure
 failures, and full-input reconnects run on both supported platforms. macOS also
 checks descriptor-based ACL refusal and real APFS `F_FULLFSYNC` directory
 barriers. JSON tests cover case-variant state fields, competing spellings, and
-nesting limits with the default or legacy Go decoder.
+nesting limits with the default or legacy Go decoder. Raw HTTP, compact, and
+WebSocket requests also verify rejection of noncanonical state fields before
+dispatch, including after a store reopen, while canonical continuations and
+vendor metadata remain supported.
 
 On Linux/amd64, dedicated child tests use one-way seccomp restrictions to inject
 real `pwrite64`, `fdatasync`, and `close` errors; the parent and shared filesystem

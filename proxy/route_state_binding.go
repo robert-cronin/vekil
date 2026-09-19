@@ -42,16 +42,21 @@ func (h *ProxyHandler) applyExplicitRequestStateBinding(operation *routeOperatio
 	if operation == nil || operation.route == nil || operation.route.legacy {
 		return nil
 	}
-	tokens, err := extractExplicitResponsesRequestState(body, headers)
+	store, err := h.ensureStateBindingStore()
+	if err != nil {
+		return err
+	}
+	var tokens []stateBindingToken
+	if store.durable != nil {
+		tokens, err = extractResponsesRequestState(body, headers, true)
+	} else {
+		tokens, err = extractExplicitResponsesRequestState(body, headers)
+	}
 	if err != nil {
 		return &providerRequestError{statusCode: http.StatusBadRequest, err: err}
 	}
 	if len(tokens) == 0 {
 		return nil
-	}
-	store, err := h.ensureStateBindingStore()
-	if err != nil {
-		return err
 	}
 	result := stateBindingLookupResult{outcome: stateBindingLookupUnknown}
 	bootstrapped := false
@@ -173,6 +178,10 @@ func explicitConversationBootstrapTarget(route *modelRoute) (targetBinding, bool
 }
 
 func extractExplicitResponsesRequestState(body []byte, headers http.Header) ([]stateBindingToken, error) {
+	return extractResponsesRequestState(body, headers, false)
+}
+
+func extractResponsesRequestState(body []byte, headers http.Header, durable bool) ([]stateBindingToken, error) {
 	if err := rejectDuplicateJSONMappingKeys(body); err != nil {
 		return nil, fmt.Errorf("invalid ambiguous JSON request: %w", err)
 	}
@@ -197,6 +206,35 @@ func extractExplicitResponsesRequestState(body []byte, headers http.Header) ([]s
 	}
 
 	if object, ok := payload.(map[string]any); ok {
+		if durable {
+			// Reject aliases rather than normalizing only this inspection copy:
+			// compatibility rewrites and upstream decoders must see the same
+			// state fields that ownership validation inspects.
+			if err := rejectResponsesStateFieldAliases(object, "previous_response_id", "conversation", "input"); err != nil {
+				return nil, err
+			}
+			if conversation, ok := object["conversation"].(map[string]any); ok {
+				if err := rejectResponsesStateFieldAliases(conversation, "id"); err != nil {
+					return nil, err
+				}
+			}
+			if input, ok := object["input"].([]any); ok {
+				for _, value := range input {
+					item, ok := value.(map[string]any)
+					if !ok {
+						continue
+					}
+					if err := rejectResponsesStateFieldAliases(item, "type"); err != nil {
+						return nil, err
+					}
+					if explicitResponsesItemOwnsEncryptedContent(item) {
+						if err := rejectResponsesStateFieldAliases(item, "encrypted_content"); err != nil {
+							return nil, err
+						}
+					}
+				}
+			}
+		}
 		var hasPreviousResponseID bool
 		if raw, exists := object["previous_response_id"]; exists {
 			if raw != nil {
@@ -245,6 +283,17 @@ func extractExplicitResponsesRequestState(body []byte, headers http.Header) ([]s
 		add(stateBindingTypeTurnState, turnState)
 	}
 	return tokens, nil
+}
+
+func rejectResponsesStateFieldAliases(object map[string]any, fields ...string) error {
+	for _, field := range fields {
+		for name := range object {
+			if name != field && strings.EqualFold(name, field) {
+				return fmt.Errorf("non-canonical responses state field; use %q", field)
+			}
+		}
+	}
+	return nil
 }
 
 func explicitResponsesRequestConversationID(value any) (string, bool, error) {
