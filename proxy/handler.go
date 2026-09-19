@@ -307,7 +307,7 @@ type ProxyHandler struct {
 	stateBindingsOnce                sync.Once
 	stateBindings                    *stateBindingStore
 	stateBindingsErr                 error
-	durableStateConfig               DurableStateBindingsConfig
+	stateBindingsOverride            StateBindingsConfig
 	insightGate                      *insightGate
 	insightGateOnce                  sync.Once
 }

@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package proxy
 
@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -23,16 +24,20 @@ func TestDurableStateFilesystemUsesDescriptor(t *testing.T) {
 	if err := checkDurableStateFilesystem(int(file.Fd())); err != nil {
 		t.Fatalf("local file filesystem = %v", err)
 	}
-	// A real unsupported regular-file descriptor, without mounting anything or
-	// requiring privileged access. Integration below substitutes only the
-	// primitive's result to model a bind-mounted file under an allowed directory.
-	proc, err := os.Open("/proc/self/stat")
+	// A real unsupported descriptor, without mounting anything or requiring
+	// privileged access. The integration test below also checks each actual
+	// database descriptor, independently of its directory's filesystem.
+	unsupported := "/proc/self/stat"
+	if runtime.GOOS == "darwin" {
+		unsupported = "/dev/null"
+	}
+	unsupportedFile, err := os.Open(unsupported)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = proc.Close() }()
-	if err := checkDurableStateFilesystem(int(proc.Fd())); !errors.Is(err, errDurableStatePlatform) {
-		t.Fatalf("proc file filesystem = %v", err)
+	defer func() { _ = unsupportedFile.Close() }()
+	if err := checkDurableStateFilesystem(int(unsupportedFile.Fd())); !errors.Is(err, errDurableStatePlatform) {
+		t.Fatalf("unsupported filesystem = %v", err)
 	}
 	if err := checkDurableStateFilesystem(-1); !errors.Is(err, errDurableStatePath) {
 		t.Fatalf("failed filesystem query = %v", err)
@@ -64,7 +69,7 @@ func TestDurableStateFilesystemChecksBothFileOpens(t *testing.T) {
 					}
 					return checkDurableStateFilesystem(fd)
 				}
-				db, _, syncDirectory, openErr := openDurableStateDatabaseWithFilesystemCheck(config.Path, false, check)
+				db, _, _, syncDirectory, openErr := openDurableStateDatabaseWithFilesystemCheck(config.Path, false, check)
 				if db != nil {
 					_ = syncDirectory()
 					_ = db.Close()

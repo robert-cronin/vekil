@@ -32,11 +32,11 @@ func durableProcessEnvironment() []string {
 	return []string{"PATH=" + os.Getenv("PATH"), "GOMAXPROCS=2", "LIVE_COPILOT_DIRECT_BEARER_TEST=0"}
 }
 
-func startDurableProcess(t *testing.T, binary, config, store, tokenDir string) *durableProcessFixture {
+func startDurableProcess(t *testing.T, binary, config, tokenDir string) *durableProcessFixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	cmd := exec.CommandContext(ctx, binary, "--host", "127.0.0.1", "--port", "0", "--providers-config", config, "--state-bindings-file", store, "--token-dir", tokenDir)
+	cmd := exec.CommandContext(ctx, binary, "--host", "127.0.0.1", "--port", "0", "--providers-config", config, "--token-dir", tokenDir)
 	cmd.Env = durableProcessEnvironment()
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -129,8 +129,8 @@ func killDurableProcess(t *testing.T, p *durableProcessFixture) {
 }
 
 func TestDurableStateProcessCrashReopen(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("durable runtime support is Linux-only")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("durable runtime support requires Linux or macOS")
 	}
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
@@ -182,14 +182,22 @@ func TestDurableStateProcessCrashReopen(t *testing.T) {
 			}))
 			defer secondary.Close()
 			config := filepath.Join(fixtureDir, "providers.json")
-			cfg := fmt.Sprintf(`{"schema_version":2,"providers":[{"id":"primary","type":"openai-compatible","base_url":%q,"auth_type":"bearer","api_key":"synthetic-primary"},{"id":"secondary","type":"openai-compatible","base_url":%q,"auth_type":"bearer","api_key":"synthetic-secondary"}],"model_routes":[{"id":"fixture-route","public_id":"public-fixture","endpoints":["/responses"],"targets":[{"id":"first","provider":"primary","upstream_model":"physical-fixture"},{"id":"second","provider":"secondary","upstream_model":"physical-fixture"}],"routing":{"mode":"priority_failover","max_target_attempts":2,"max_upstream_sends":2}}]}`, primary.URL, secondary.URL)
+			store := filepath.Join(fixtureDir, "bindings.db")
+			stateConfig := map[string]any{"file": store, "max_entries": 32}
+			if stream {
+				stateConfig["mode"] = "durable"
+			}
+			stateJSON, err := json.Marshal(stateConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := fmt.Sprintf(`{"schema_version":2,"state_bindings":%s,"providers":[{"id":"primary","type":"openai-compatible","base_url":%q,"auth_type":"bearer","api_key":"synthetic-primary"},{"id":"secondary","type":"openai-compatible","base_url":%q,"auth_type":"bearer","api_key":"synthetic-secondary"}],"model_routes":[{"id":"fixture-route","public_id":"public-fixture","endpoints":["/responses"],"targets":[{"id":"first","provider":"primary","upstream_model":"physical-fixture"},{"id":"second","provider":"secondary","upstream_model":"physical-fixture"}],"routing":{"mode":"priority_failover","max_target_attempts":2,"max_upstream_sends":2}}]}`, stateJSON, primary.URL, secondary.URL)
 			if err := os.WriteFile(config, []byte(cfg), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			store := filepath.Join(fixtureDir, "bindings.db")
 			tokenDir := filepath.Join(fixtureDir, "unused-tokens")
-			first := startDurableProcess(t, binary, config, store, tokenDir)
-			request := func(base, body string, turn bool) string {
+			first := startDurableProcess(t, binary, config, tokenDir)
+			request := func(t *testing.T, base, body string, turn bool) string {
 				t.Helper()
 				req, err := http.NewRequest(http.MethodPost, base+"/v1/responses", strings.NewReader(body))
 				if err != nil {
@@ -216,14 +224,14 @@ func TestDurableStateProcessCrashReopen(t *testing.T) {
 				}
 				return string(data)
 			}
-			initial := request(first.url, fmt.Sprintf(`{"model":"public-fixture","stream":%t,"input":"start"}`, stream), false)
+			initial := request(t, first.url, fmt.Sprintf(`{"model":"public-fixture","stream":%t,"input":"start"}`, stream), false)
 			if !strings.Contains(initial, "encrypted-process-fixture") || !strings.Contains(initial, "resp-process-fixture") {
 				t.Fatal("provider state not observed by client")
 			}
 			// A real second process must refuse the live database, not wait or
 			// start an independent store. It contacts no provider.
 			lockCtx, lockCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			second := exec.CommandContext(lockCtx, binary, "--host", "127.0.0.1", "--port", "0", "--providers-config", config, "--state-bindings-file", store, "--token-dir", tokenDir)
+			second := exec.CommandContext(lockCtx, binary, "--host", "127.0.0.1", "--port", "0", "--providers-config", config, "--token-dir", tokenDir)
 			second.Env = durableProcessEnvironment()
 			out, err := second.CombinedOutput()
 			lockCancel()
@@ -231,9 +239,10 @@ func TestDurableStateProcessCrashReopen(t *testing.T) {
 				t.Fatalf("second writer did not refuse: %v %s", err, out)
 			}
 			killDurableProcess(t, first)
-			restarted := startDurableProcess(t, binary, config, store, tokenDir)
+			restarted := startDurableProcess(t, binary, config, tokenDir)
 			beforePrimary, beforeSecondary := primaryCalls.Load(), secondaryCalls.Load()
-			continued := request(restarted.url, fmt.Sprintf(`{"model":"public-fixture","stream":%t,"previous_response_id":"resp-process-fixture","input":[{"type":"reasoning","encrypted_content":"encrypted-process-fixture","summary":[]},{"role":"user","content":"continue"}]}`, stream), true)
+			continuation := fmt.Sprintf(`{"model":"public-fixture","stream":%t,"previous_response_id":"resp-process-fixture","input":[{"type":"reasoning","encrypted_content":"encrypted-process-fixture","summary":[]},{"role":"user","content":"continue"}]}`, stream)
+			continued := request(t, restarted.url, continuation, true)
 			if !strings.Contains(continued, "encrypted-process-fixture") {
 				t.Fatal("restarted response lost state")
 			}
@@ -262,10 +271,25 @@ func TestDurableStateProcessCrashReopen(t *testing.T) {
 			if out, err := prune.CombinedOutput(); err != nil || !strings.Contains(string(out), "Pruned 0 ownership records") {
 				t.Fatalf("whole-second CLI prune: %v %s", err, out)
 			}
-			afterPruning := startDurableProcess(t, binary, config, store, tokenDir)
-			continued = request(afterPruning.url, fmt.Sprintf(`{"model":"public-fixture","stream":%t,"previous_response_id":"resp-process-fixture","input":[{"type":"reasoning","encrypted_content":"encrypted-process-fixture","summary":[]},{"role":"user","content":"continue"}]}`, stream), true)
+			afterPruning := startDurableProcess(t, binary, config, tokenDir)
+			continued = request(t, afterPruning.url, continuation, true)
 			if !strings.Contains(continued, "encrypted-process-fixture") || primaryCalls.Load() != beforePrimary || secondaryCalls.Load() != beforeSecondary+2 {
 				t.Fatal("CLI pruning lost retained proof or changed its exact issuer")
+			}
+			const clients = 8
+			beforeSecondary = secondaryCalls.Load()
+			t.Run("concurrent_clients", func(t *testing.T) {
+				for i := range clients {
+					t.Run(fmt.Sprintf("client_%d", i), func(t *testing.T) {
+						t.Parallel()
+						if body := request(t, afterPruning.url, continuation, true); !strings.Contains(body, "encrypted-process-fixture") {
+							t.Fatal("concurrent continuation lost provider state")
+						}
+					})
+				}
+			})
+			if primaryCalls.Load() != beforePrimary || secondaryCalls.Load() != beforeSecondary+clients {
+				t.Fatal("concurrent continuations changed issuer or send count")
 			}
 			killDurableProcess(t, afterPruning)
 		})

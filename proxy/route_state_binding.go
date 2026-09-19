@@ -14,13 +14,26 @@ func (h *ProxyHandler) ensureStateBindingStore() (*stateBindingStore, error) {
 		return nil, fmt.Errorf("proxy handler is required")
 	}
 	h.stateBindingsOnce.Do(func() {
-		if h.durableStateConfig.Path != "" {
-			h.stateBindings, h.stateBindingsErr = newDurableStateBindingStore(h.durableStateConfig)
-		} else if h.durableStateConfig.MaxEntries != 0 {
-			h.stateBindingsErr = errDurableStateConfig
-		} else {
-			h.stateBindings, h.stateBindingsErr = newStateBindingStore(stateBindingStoreConfig{})
+		config, err := resolveStateBindingsConfig(h.providersConfig, h.stateBindingsOverride)
+		if err != nil {
+			h.stateBindingsErr = err
+			return
 		}
+		if config.Mode == "memory" {
+			h.stateBindings, h.stateBindingsErr = newStateBindingStore(stateBindingStoreConfig{maxEntries: config.MaxEntries})
+			return
+		}
+		if config.File == "" {
+			config.File, err = defaultStateBindingsPath()
+			if err == nil {
+				err = createPrivateStateDirectory(config.File)
+			}
+			if err != nil {
+				h.stateBindingsErr = err
+				return
+			}
+		}
+		h.stateBindings, h.stateBindingsErr = newDurableStateBindingStore(DurableStateBindingsConfig{Path: config.File, MaxEntries: config.MaxEntries})
 	})
 	return h.stateBindings, h.stateBindingsErr
 }
@@ -340,6 +353,19 @@ func isProxyOwnedEncryptedContent(value string) bool {
 }
 
 func extractExplicitResponsesOutputState(body []byte) ([]stateBindingToken, error) {
+	return extractResponsesOutputState(body, false)
+}
+
+func extractDurableResponsesOutputState(body []byte) ([]stateBindingToken, error) {
+	// Validate the original bytes before map decoding or model rewriting can
+	// collapse duplicate values that remain visible in a raw representation.
+	if err := validateUnambiguousResponsesJSON(body); err != nil {
+		return nil, fmt.Errorf("ambiguous explicit route responses JSON")
+	}
+	return extractResponsesOutputState(body, true)
+}
+
+func extractResponsesOutputState(body []byte, foldedAliases bool) ([]stateBindingToken, error) {
 	var payload any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
@@ -363,10 +389,38 @@ func extractExplicitResponsesOutputState(body []byte) ([]stateBindingToken, erro
 	if !ok {
 		return nil, fmt.Errorf("responses output root must be a JSON object")
 	}
+	if foldedAliases {
+		if err := normalizeResponsesStateObjectFields(object, "type", "response", "item"); err != nil {
+			return nil, err
+		}
+	}
 	visitItem := func(stateType stateBindingType, value string) {
 		add(stateType, value)
 	}
+	visitOutputItem := func(value any) error {
+		if item, ok := value.(map[string]any); ok && foldedAliases {
+			if err := normalizeResponsesStateObjectFields(item, "type"); err != nil {
+				return err
+			}
+			if explicitResponsesItemOwnsEncryptedContent(item) {
+				if err := normalizeResponsesStateObjectFields(item, "encrypted_content"); err != nil {
+					return err
+				}
+			}
+		}
+		return visitExplicitResponsesItem(value, false, visitItem)
+	}
 	visitResponse := func(response map[string]any) error {
+		if foldedAliases {
+			if err := normalizeResponsesStateObjectFields(response, "id", "conversation", "output"); err != nil {
+				return err
+			}
+			if conversation, ok := response["conversation"].(map[string]any); ok {
+				if err := normalizeResponsesStateObjectFields(conversation, "id"); err != nil {
+					return err
+				}
+			}
+		}
 		if token, ok := response["id"].(string); ok {
 			add(stateBindingTypeResponseID, token)
 		}
@@ -374,7 +428,14 @@ func extractExplicitResponsesOutputState(body []byte) ([]stateBindingToken, erro
 		if hasConversation {
 			add(stateBindingTypeConversationID, conversationID)
 		}
-		return visitExplicitResponsesItems(response["output"], false, visitItem)
+		if output, ok := response["output"].([]any); ok {
+			for _, item := range output {
+				if err := visitOutputItem(item); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	}
 
 	// A non-streaming response is the root object. Streaming lifecycle events
@@ -392,11 +453,36 @@ func extractExplicitResponsesOutputState(body []byte) ([]stateBindingToken, erro
 		}
 	}
 	if item, exists := object["item"]; exists {
-		if err := visitExplicitResponsesItem(item, false, visitItem); err != nil {
+		if err := visitOutputItem(item); err != nil {
 			return nil, err
 		}
 	}
 	return tokens, nil
+}
+
+// Struct decoders used by websocket clients accept folded JSON field names.
+// Inspect those same names for durable proof, rejecting competing spellings
+// that decoding or model rewriting might merge differently. Normalize only the
+// parsed inspection copy, and only schema-owned state paths. Vendor metadata,
+// message text, and the original bytes forwarded to clients remain untouched.
+func normalizeResponsesStateObjectFields(object map[string]any, fields ...string) error {
+	for _, field := range fields {
+		matched := ""
+		for name := range object {
+			if !strings.EqualFold(name, field) {
+				continue
+			}
+			if matched != "" {
+				return fmt.Errorf("ambiguous responses %s aliases", field)
+			}
+			matched = name
+		}
+		if matched != "" && matched != field {
+			object[field] = object[matched]
+			delete(object, matched)
+		}
+	}
+	return nil
 }
 
 func (h *ProxyHandler) bindExplicitStateTokens(info explicitRouteResponseInfo, tokens []stateBindingToken) error {

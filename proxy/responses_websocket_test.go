@@ -1143,6 +1143,7 @@ func TestCompactResponsesRequest_ExplicitPinnedTargetsKeepProviderCredentialsAnd
 		logger.New(logger.LevelError),
 		WithProvidersConfig(ProvidersConfig{
 			SchemaVersion: 2,
+			StateBindings: &StateBindingsConfig{Mode: "memory"},
 			Providers: []ProviderConfig{
 				{
 					ID:           "compact-primary",
@@ -6799,6 +6800,7 @@ func newExplicitRouteResponsesWebSocketHandler(t *testing.T, primaryURL, seconda
 		logger.New(logger.LevelError),
 		WithProvidersConfig(ProvidersConfig{
 			SchemaVersion: 2,
+			StateBindings: &StateBindingsConfig{Mode: "memory"},
 			Providers: []ProviderConfig{
 				{
 					ID:      "ws-primary",

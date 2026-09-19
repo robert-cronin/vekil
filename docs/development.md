@@ -69,11 +69,14 @@ For large request and replay paths, keep the `64 MiB` request boundary in the de
 
 ### Durable provider-state suite
 
-Durable mode is opt-in and Linux-only. These tests use temporary private stores,
-synthetic credentials and controlled loopback providers, never live inference:
+Durable mode is the default for schema-v2 explicit routes on supported Linux
+filesystems and macOS APFS. Run the storage and process suites on both platforms.
+Tests use temporary private stores, synthetic credentials, and controlled
+loopback providers, never live inference. General route fixtures explicitly use
+memory mode so tests cannot open the user's default database:
 
 ```bash
-go test ./proxy ./server -run '^TestDurable' -count=1
+go test ./proxy ./server -run '^Test(Durable|StateBindings|StateBindingStats|LoadProvidersConfigFileStateBindings)' -count=1
 go test . -run '^Test(DurableStateProcessCrashReopen|StatePruneCommand)' -count=1
 go test -race ./... -count=1
 GOMAXPROCS=2 go test ./proxy -run '^$' -bench '^BenchmarkStateBindingExposure$' -benchtime=100x -benchmem -count=10
@@ -81,13 +84,27 @@ GOMAXPROCS=2 go test ./proxy -run '^$' -bench '^BenchmarkDurableStateLookupAndOp
 GOMAXPROCS=2 go test ./proxy -run '^$' -bench '^BenchmarkDurableNestedResponseValidation$' -benchtime=5x -benchmem -count=3
 ```
 
-Coverage includes real binary/process crash and reopen, kills before/after commit
-but before exposure, exact issuer and credential-source changes, private-file
-validation, logical capacity/tombstones, offline pruning, constructor/drain locks,
-JSON/SSE and HTTP/native-websocket exposure failures, and full-input reconnects.
+Coverage includes providers-file-only startup, configuration precedence, private
+default-path creation, real binary/process crash and reopen, kills before/after
+commit but before exposure, exact issuer and credential-source changes,
+private-file validation, logical capacity/tombstones without full preallocation,
+dashboard warnings, and offline pruning. Concurrent clients, second-writer
+refusal, constructor/drain locks, JSON/SSE and HTTP/native-websocket exposure
+failures, and full-input reconnects run on both supported platforms. macOS also
+checks descriptor-based ACL refusal and real APFS `F_FULLFSYNC` directory
+barriers. JSON tests cover case-variant state fields, competing spellings, and
+nesting limits with the default or legacy Go decoder.
+
 On Linux/amd64, dedicated child tests use one-way seccomp restrictions to inject
-real `pwrite64`, `fdatasync` and `close` errors; the parent and shared filesystem are not
-modified. These are process/storage boundary checks, not power-loss simulation.
+real `pwrite64`, `fdatasync`, and `close` errors; the parent and shared filesystem
+are not modified. Process kills and syscall failures exercise recovery
+boundaries; they do not simulate a host or drive power loss. Cross-compiling
+these tests alone does not execute the platform's crash or fault coverage.
+
+The `darwin-launch` CI job also runs the durable proxy/server and menubar tests,
+including a legacy JSON backend depth/alias regression check. Temporary provider
+and policy smoke proxies explicitly choose memory mode so they do not open a
+user's persistent store.
 
 The exposure benchmark calls the production JSON/SSE writers and synchronous
 binding store with fresh/repeated batches of 1/8 records and initial occupancy

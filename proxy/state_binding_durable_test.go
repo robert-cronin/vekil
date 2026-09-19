@@ -16,8 +16,8 @@ import (
 
 func newDurableStoreFixture(t *testing.T, maxEntries int) (*stateBindingStore, DurableStateBindingsConfig) {
 	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skip("durable filesystem support is Linux-only")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("durable filesystem support requires Linux or macOS")
 	}
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {

@@ -829,6 +829,7 @@ launch_proxy() {
     --log-level info \
     --token-dir "${PROXY_TOKEN_DIR}" \
     --providers-config "${CONFIG_JSON}" \
+    --state-bindings-mode memory \
     >"${PROXY_LOG}" 2>&1 &
   proxy_pid="$!"
   proxy_pgid="${proxy_pid}"

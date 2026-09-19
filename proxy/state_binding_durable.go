@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"os"
 	"sync"
 	"time"
 
@@ -18,20 +19,24 @@ import (
 // DurableStateBindingsConfig enables local, single-writer ownership recovery.
 // Path must name a private file in an existing owner-only directory. MaxEntries
 // limits logical records (including tombstones), NOT database-file bytes.
-// Records never expire automatically. Empty Path preserves memory-only mode.
+// Records never expire automatically. Empty Path uses the private application-data
+// location when MaxEntries is set. An entirely empty option leaves defaults intact.
 type DurableStateBindingsConfig struct {
 	Path       string
 	MaxEntries int
 }
 
 func WithDurableStateBindings(config DurableStateBindingsConfig) Option {
-	return func(h *ProxyHandler) { h.durableStateConfig = config }
+	if config.Path == "" && config.MaxEntries == 0 {
+		return func(*ProxyHandler) {}
+	}
+	return WithStateBindingsConfig(StateBindingsConfig{Mode: "durable", File: config.Path, MaxEntries: config.MaxEntries})
 }
 
 var (
 	errDurableStateConfig   = errors.New("invalid durable state configuration")
 	errDurableStatePath     = errors.New("durable state requires a private regular file in an owner-only local directory")
-	errDurableStatePlatform = errors.New("durable state is supported only on tested Linux local filesystems")
+	errDurableStatePlatform = errors.New("durable state requires a supported local Linux filesystem or macOS APFS volume")
 	errDurableStateLocked   = errors.New("durable state store is already in use")
 	errDurableStateCorrupt  = errors.New("durable state store is corrupt or incompatible; preserve it for operator recovery")
 	errDurableStateIO       = errors.New("durable state storage failed; state was not exposed; operator recovery is required")
@@ -52,8 +57,11 @@ var durableStateFormat = []byte("vekil-state-v1")
 const durableStateRecordSize = 1 + 3*sha256.Size + 8 + sha256.Size
 
 type durableStateBindings struct {
-	mu         sync.Mutex
-	db         *bolt.DB
+	mu sync.Mutex
+	db *bolt.DB
+	// file is the same descriptor owned and closed by bbolt. It supplies stats
+	// for the open inode even if its original path is renamed or replaced.
+	file       *os.File
 	key        [32]byte
 	maxEntries int
 	now        func() time.Time
@@ -70,16 +78,16 @@ func newDurableStateBindingStore(config DurableStateBindingsConfig) (*stateBindi
 
 func openDurableStateBindingStore(config DurableStateBindingsConfig, allowCreate bool) (*stateBindingStore, error) {
 	if config.MaxEntries == 0 {
-		config.MaxEntries = defaultStateBindingMaxEntries
+		config.MaxEntries = defaultDurableStateBindingMaxEntries
 	}
 	if config.Path == "" || config.MaxEntries < 1 {
 		return nil, errDurableStateConfig
 	}
-	db, created, syncDirectory, err := openDurableStateDatabase(config.Path, allowCreate)
+	db, file, created, syncDirectory, err := openDurableStateDatabase(config.Path, allowCreate)
 	if err != nil {
 		return nil, err
 	}
-	d := &durableStateBindings{db: db, maxEntries: config.MaxEntries, now: time.Now}
+	d := &durableStateBindings{db: db, file: file, maxEntries: config.MaxEntries, now: time.Now}
 	if err := d.initialize(created); err != nil {
 		_ = syncDirectory()
 		_ = db.Close()
@@ -490,6 +498,7 @@ func (s *stateBindingStore) close() error {
 	}
 	err := d.db.Close()
 	d.db = nil
+	d.file = nil
 	if err != nil {
 		return errDurableStateIO
 	}

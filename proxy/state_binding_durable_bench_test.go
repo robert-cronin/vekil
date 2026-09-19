@@ -21,8 +21,8 @@ func durableBenchmarkStore(b *testing.B, durable bool, occupancy int) (*stateBin
 	var s *stateBindingStore
 	var err error
 	if durable {
-		if runtime.GOOS != "linux" {
-			b.Skip("durable mode is Linux-only")
+		if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+			b.Skip("durable mode requires Linux or macOS")
 		}
 		dir := b.TempDir()
 		if err := os.Chmod(dir, 0o700); err != nil {

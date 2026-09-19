@@ -216,6 +216,9 @@ func validateAndNormalizeProvidersConfig(cfg ProvidersConfig) (validatedProvider
 	if cfg.schemaVersionSet && cfg.SchemaVersion == 0 {
 		return validatedProvidersConfig{}, configPathError("schema_version", "unsupported schema version 0; supported versions are 1 and 2")
 	}
+	if err := validateProviderStateBindings(cfg); err != nil {
+		return validatedProvidersConfig{}, err
+	}
 
 	switch validated.schemaVersion {
 	case ProvidersConfigSchemaVersion1:
@@ -470,6 +473,10 @@ func validateSchemaV2FeatureFields(cfg ProvidersConfig, schemaVersion int) error
 
 func cloneProvidersConfigForValidation(cfg ProvidersConfig) ProvidersConfig {
 	cloned := cfg
+	if cfg.StateBindings != nil {
+		stateBindings := *cfg.StateBindings
+		cloned.StateBindings = &stateBindings
+	}
 	if cfg.Providers != nil {
 		cloned.Providers = make([]ProviderConfig, len(cfg.Providers))
 		for index := range cfg.Providers {
@@ -1249,8 +1256,10 @@ func compileExplicitModelRoutes(cfg ProvidersConfig, providers map[string]*provi
 }
 
 var topLevelProviderConfigFields = configFieldSet(
-	"schema_version", "providers", "model_routes", "policy_profiles", "tool_optimizers", "insight_model",
+	"schema_version", "providers", "model_routes", "policy_profiles", "tool_optimizers", "insight_model", "state_bindings",
 )
+
+var stateBindingsConfigFields = configFieldSet("mode", "max_entries", "file")
 
 var providerConfigFields = configFieldSet(
 	"id", "type", "default", "include_models", "exclude_models", "base_url", "auth_mode",
@@ -1319,6 +1328,11 @@ func validateJSONConfigFieldPaths(body []byte) error {
 	}
 	if err := validateJSONKnownFields(root, topLevelProviderConfigFields, ""); err != nil {
 		return err
+	}
+	if bindings, ok := root["state_bindings"].(map[string]interface{}); ok {
+		if err := validateJSONKnownFields(bindings, stateBindingsConfigFields, "state_bindings"); err != nil {
+			return err
+		}
 	}
 	if providers, ok := root["providers"].([]interface{}); ok {
 		for index, rawProvider := range providers {
@@ -1434,6 +1448,11 @@ func validateYAMLConfigFieldPaths(body []byte) error {
 	if err := validateYAMLKnownFields(root, topLevelProviderConfigFields, ""); err != nil {
 		return err
 	}
+	if bindings := yamlMappingValue(root, "state_bindings"); bindings != nil && bindings.Kind == yaml.MappingNode {
+		if err := validateYAMLKnownFields(bindings, stateBindingsConfigFields, "state_bindings"); err != nil {
+			return err
+		}
+	}
 	if providers := yamlMappingValue(root, "providers"); providers != nil && providers.Kind == yaml.SequenceNode {
 		for index, provider := range providers.Content {
 			if provider.Kind != yaml.MappingNode {
@@ -1543,6 +1562,12 @@ func markJSONProvidersConfigFieldPresence(body []byte, cfg *ProvidersConfig) {
 	if json.Unmarshal(body, &root) != nil {
 		return
 	}
+	if cfg.StateBindings != nil {
+		var bindings map[string]json.RawMessage
+		if json.Unmarshal(root["state_bindings"], &bindings) == nil {
+			_, cfg.StateBindings.maxEntriesSet = bindings["max_entries"]
+		}
+	}
 
 	var providers []map[string]json.RawMessage
 	if json.Unmarshal(root["providers"], &providers) == nil {
@@ -1621,6 +1646,12 @@ func markYAMLProvidersConfigFieldPresence(body []byte, cfg *ProvidersConfig) {
 	root := document.Content[0]
 	if root.Kind != yaml.MappingNode {
 		return
+	}
+	if cfg.StateBindings != nil {
+		bindings := yamlDereferenceAlias(yamlMappingValue(root, "state_bindings"))
+		if bindings != nil && bindings.Kind == yaml.MappingNode {
+			cfg.StateBindings.maxEntriesSet = yamlMappingHasField(bindings, "max_entries")
+		}
 	}
 
 	if providers := yamlMappingValue(root, "providers"); providers != nil && providers.Kind == yaml.SequenceNode {

@@ -16,8 +16,9 @@ state validation encounters a missing binding.
 
 The code does not identify why proof is missing. A binding may never have been
 observed here, or may have been lost through expiry, eviction, restart, or sending
-the request to another process in default memory-only mode. With opt-in
-[durable ownership](state-recovery.md), proof survives process restart in the
+the request to another process when using `mode: memory`.
+[Durable ownership](state-recovery.md) is the default for schema-v2 explicit
+routes. Its proof survives process restart in the
 same store but may be missing because it was never committed there, was explicitly
 pruned, or the original store was lost or replaced. A proven owner disagreement, conflict tombstone,
 malformed value, or cross-route binding still fails with its existing validation

@@ -104,6 +104,12 @@ func responsesLifecycleEventHasResponse(eventType string) bool {
 }
 
 func validateUnambiguousResponsesJSON(data []byte) error {
+	// Token does not enforce the nesting limit in the legacy JSON decoder.
+	// Validate first so the recursive duplicate-key scan has the same bound as
+	// Unmarshal, including when built with GOEXPERIMENT=nojsonv2.
+	if !json.Valid(data) {
+		return errors.New("expected one complete JSON response within the nesting limit")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	// Unlike configuration diagnostics, this path must not build an ever-longer
@@ -139,14 +145,6 @@ func writeExplicitResponsesResponse(ctx context.Context, h *ProxyHandler, w http
 	if len(data) > maxLargeRequestBodySize {
 		return newResponseBodyWriteError(resp, errors.New("explicit route response exceeds normalization limit"), false, true, false)
 	}
-	if durable && len(data) != 0 {
-		// Map decoding loses earlier duplicate values while nested raw JSON
-		// can still expose them. Reject ambiguity before binding any batch state.
-		if err := validateUnambiguousResponsesJSON(data); err != nil {
-			return newResponseBodyWriteError(resp, errors.New("ambiguous explicit route responses JSON"), false, true, false)
-		}
-	}
-
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	if success {
 		observeResponsesUsage(ctx, sniffResponsesUsageBody(data))
@@ -158,7 +156,11 @@ func writeExplicitResponsesResponse(ctx context.Context, h *ProxyHandler, w http
 		var tokenErr error
 		emptyAllowed := durable && (!success || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent)
 		if len(data) != 0 || !emptyAllowed {
-			bodyTokens, tokenErr = extractExplicitResponsesOutputState(data)
+			if durable {
+				bodyTokens, tokenErr = extractDurableResponsesOutputState(data)
+			} else {
+				bodyTokens, tokenErr = extractExplicitResponsesOutputState(data)
+			}
 		}
 		headerTokens, headerErr := explicitResponseHeaderStateTokens(resp.Header)
 		if headerErr != nil {
@@ -346,16 +348,16 @@ func rewriteResponsesSSEEventModel(raw []byte, publicModel string, onEvent func(
 
 func normalizeResponsesStreamBodyWithBinding(h *ProxyHandler, source io.ReadCloser, info explicitRouteResponseInfo) io.ReadCloser {
 	return normalizeResponsesStreamBody(source, info.publicID, func(data []byte) error {
-		if h != nil && h.stateBindings != nil && h.stateBindings.durable != nil {
-			// Validate the original event, before extraction or model rewriting
-			// can collapse duplicates that remain visible in a raw representation.
-			if err := validateUnambiguousResponsesJSON(data); err != nil {
-				return errors.New("ambiguous explicit route responses JSON")
-			}
+		durable := h != nil && h.stateBindings != nil && h.stateBindings.durable != nil
+		var tokens []stateBindingToken
+		var err error
+		if durable {
+			tokens, err = extractDurableResponsesOutputState(data)
+		} else {
+			tokens, err = extractExplicitResponsesOutputState(data)
 		}
-		tokens, err := extractExplicitResponsesOutputState(data)
 		if err != nil {
-			if h != nil && h.stateBindings != nil && h.stateBindings.durable != nil {
+			if durable {
 				// A malformed state-bearing event cannot establish durable proof.
 				// Keep memory-only compatibility, but never expose it in this mode.
 				return fmt.Errorf("malformed explicit route responses state")
@@ -365,7 +367,7 @@ func normalizeResponsesStreamBodyWithBinding(h *ProxyHandler, source io.ReadClos
 			// downstream pipe; only successfully extracted state is bindable.
 			return nil
 		}
-		if h != nil && h.stateBindings != nil && h.stateBindings.durable != nil {
+		if durable {
 			errorTokens, err := durableResponsesErrorHeaderState(data)
 			if err != nil {
 				return fmt.Errorf("malformed explicit route responses error headers")

@@ -1,9 +1,15 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package proxy
 
-import bolt "go.etcd.io/bbolt"
+import (
+	"os"
 
-func openDurableStateDatabase(string, bool) (*bolt.DB, bool, func() error, error) {
-	return nil, false, nil, errDurableStatePlatform
+	bolt "go.etcd.io/bbolt"
+)
+
+func openDurableStateDatabase(string, bool) (*bolt.DB, *os.File, bool, func() error, error) {
+	return nil, nil, false, nil, errDurableStatePlatform
 }
+
+func syncDurableStateDirectory(int) error { return errDurableStatePlatform }
