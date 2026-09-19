@@ -15,6 +15,10 @@ import (
 
 const durableErrorFixture = `{"error":{"code":"fixture_error","message":"upstream fixture failure"},"id":"resp-error-fixture","conversation":"conv-error-fixture","output":[{"type":"reasoning","encrypted_content":"reasoning-error-fixture","summary":[]}]}`
 
+// Failover requires an error without generated output. Keep state identifiers
+// so discarded and final admission responses still exercise exact ownership.
+const durableAdmissionErrorFixture = `{"error":{"code":"fixture_error","message":"upstream fixture failure"},"id":"resp-error-fixture","conversation":"conv-error-fixture","output":[]}`
+
 func invokeDurableErrorSurface(h *ProxyHandler, surface string, w http.ResponseWriter) {
 	body := `{"model":"public-model","input":"fixture"}`
 	switch surface {
@@ -43,14 +47,18 @@ func TestDurableResponsesFinalErrorFailoverOwnership(t *testing.T) {
 					firstSends.Add(1)
 					w.Header().Set("X-Codex-Turn-State", "first-turn-fixture")
 					w.WriteHeader(http.StatusTooManyRequests)
-					_, _ = io.WriteString(w, strings.ReplaceAll(durableErrorFixture, "error-fixture", "first-error-fixture"))
+					_, _ = io.WriteString(w, strings.ReplaceAll(durableAdmissionErrorFixture, "error-fixture", "first-error-fixture"))
 				}))
 				defer first.Close()
 				second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					secondSends.Add(1)
 					w.Header().Set("X-Codex-Turn-State", "turn-error-fixture")
 					w.WriteHeader(secondStatus)
-					_, _ = io.WriteString(w, durableErrorFixture)
+					body := durableErrorFixture
+					if secondStatus == http.StatusTooManyRequests {
+						body = durableAdmissionErrorFixture
+					}
+					_, _ = io.WriteString(w, body)
 				}))
 				defer second.Close()
 				s, config := newDurableStoreFixture(t, 32)

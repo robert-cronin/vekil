@@ -19,6 +19,107 @@ func (s *durableFixtureTokenSource) AccessToken(context.Context) (string, error)
 	return s.token.Load().(string), nil
 }
 
+func TestDurableResponsesAzureAdmissionRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name, request, principal string
+		seed                     bool
+		wantStatus               int
+	}{
+		{"fresh response", `{"model":"public-model","input":"start"}`, "principal-b", false, http.StatusOK},
+		{"conversation bootstrap", `{"model":"public-model","conversation":"conv-client-bootstrap","input":"start"}`, "principal-b", false, http.StatusOK},
+		{"bound principal change", `{"model":"public-model","previous_response_id":"resp-durable-fixture","input":"continue"}`, "principal-b", true, http.StatusBadRequest},
+		{"bound token refresh", `{"model":"public-model","previous_response_id":"resp-durable-fixture","input":"continue"}`, "principal-a", true, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			var lastBearer atomic.Value
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				lastBearer.Store(r.Header.Get("Authorization"))
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, durableWireFixture)
+			}))
+			defer upstream.Close()
+			store, config := newDurableStoreFixture(t, 32)
+			source := &durableFixtureTokenSource{}
+			token := func(principal, refresh string) string {
+				return testOpenAICodexJWT(t, map[string]interface{}{
+					"iss": "https://issuer.example.test", "tid": "tenant-fixture", "oid": principal,
+					"exp": time.Now().Add(time.Hour).Unix(), "jti": refresh,
+				})
+			}
+			oldToken, refreshedToken := token("principal-a", "initial"), token(tc.principal, "refreshed")
+			source.token.Store(oldToken)
+			provider := explicitRouteTestProvider("primary", upstream.URL, "")
+			provider.authMode, provider.azureToken, provider.tokenScope = providerAuthModeAzureIdentity, source, defaultAzureIdentityTokenScope
+			h, route := durableWireHandler(t, store, provider)
+			h.streamingUpstreamTimeout = 5 * time.Second
+			route.policy.mode = routeModePrimaryOnly
+			advance := azureTrafficTestClock(h)
+			if tc.seed {
+				if first := durableWireRequest(h, `{"model":"public-model","input":"seed"}`, false, false); first.Code != http.StatusOK {
+					t.Fatalf("seed = %d %s", first.Code, first.Body.String())
+				}
+			}
+			before := calls.Load()
+			seed := azureTrafficTestRequest(t, h, t.Context(), provider.id, upstream.URL, route.targets[0].upstreamModel)
+			azureRouteTrafficFromRequest(seed).observe(http.StatusTooManyRequests, http.Header{"Retry-After": {"1"}})
+			result := make(chan *httptest.ResponseRecorder, 1)
+			go func() { result <- durableWireRequest(h, tc.request, false, false) }()
+			waitForAzureTrafficWaiters(t, h, 1)
+			// Change the actual credential source while the authenticated request
+			// waits. The dispatch refresh must precede ownership validation/claim.
+			source.token.Store(refreshedToken)
+			advance(time.Second)
+			select {
+			case response := <-result:
+				if response.Code != tc.wantStatus {
+					t.Errorf("queued request = %d %s, want %d", response.Code, response.Body.String(), tc.wantStatus)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("queued request did not complete")
+			}
+			waitForAzureTrafficWaiters(t, h, 0)
+			continuation := `{"model":"public-model","previous_response_id":"resp-durable-fixture","input":"continue"}`
+			if tc.wantStatus == http.StatusBadRequest {
+				if calls.Load() != before {
+					t.Error("bound state was dispatched with a different principal")
+				}
+				source.token.Store(oldToken)
+				// A rejected refresh must release its admission permit so the
+				// original owner can continue without another shutdown or reset.
+				if retry := durableWireRequest(h, continuation, false, false); retry.Code != http.StatusOK {
+					t.Fatalf("original owner retry = %d %s", retry.Code, retry.Body.String())
+				}
+			} else {
+				if calls.Load() != before+1 || lastBearer.Load() != "Bearer "+refreshedToken {
+					t.Error("queued request did not use the refreshed credential exactly once")
+				}
+				if tc.name == "conversation bootstrap" {
+					continuation = tc.request
+				}
+			}
+			h.BeginShutdown()
+			if err := h.WaitLifecycleWorkers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := newDurableStateBindingStore(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeDurableStoreFixture(t, reopened)
+			h, _ = durableWireHandler(t, reopened, provider)
+			if response := durableWireRequest(h, continuation, false, false); response.Code != http.StatusOK {
+				t.Fatalf("actual owner after restart = %d %s", response.Code, response.Body.String())
+			}
+			h.BeginShutdown()
+			if err := h.WaitLifecycleWorkers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestDurableResponsesActualCredentialSnapshot(t *testing.T) {
 	for _, kind := range []string{"codex", "entra"} {
 		t.Run(kind, func(t *testing.T) {

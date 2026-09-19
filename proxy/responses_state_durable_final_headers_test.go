@@ -196,14 +196,18 @@ func TestDurableFinalErrorHeadersSelectExactIssuer(t *testing.T) {
 					firstSends.Add(1)
 					w.Header().Set("X-Codex-Turn-State", "first-turn-fixture")
 					w.WriteHeader(http.StatusTooManyRequests)
-					_, _ = io.WriteString(w, durableErrorFixture)
+					_, _ = io.WriteString(w, durableAdmissionErrorFixture)
 				}))
 				defer first.Close()
 				second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					secondSends.Add(1)
 					w.Header().Set("X-Codex-Turn-State", "second-turn-fixture")
 					w.WriteHeader(secondStatus)
-					_, _ = io.WriteString(w, durableErrorFixture)
+					body := durableErrorFixture
+					if secondStatus == http.StatusTooManyRequests {
+						body = durableAdmissionErrorFixture
+					}
+					_, _ = io.WriteString(w, body)
 				}))
 				defer second.Close()
 				s, config := newDurableStoreFixture(t, 32)
