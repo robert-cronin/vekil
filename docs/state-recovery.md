@@ -204,9 +204,10 @@ The cutoff must be in the past and on a whole-second boundary, matching the
 store's timestamp precision. Omit the fractional-second component in CLI input;
 the pruning API rejects cutoffs with nonzero nanoseconds. Both validate before
 opening the store. Records from the cutoff second are retained.
-Records issued before it (or subsequently marked conflicting before it) are
-deleted atomically; repeated same-owner observations
-do not refresh issuance time. Pruned opaque state becomes unknown. Conversation-
+Records first issued before it (or first marked conflicting before it) are
+deleted atomically. Repeated observations preserve the original issuance time;
+repeated collisions preserve a tombstone's first conflict time.
+Pruned opaque state becomes unknown. Conversation-
 only IDs retain their narrow deterministic first-use bootstrap rule, so pruning
 their proof removes Vekil's ability to distinguish old use from first use.
 No provider credentials are loaded and no inference is performed by pruning.

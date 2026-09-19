@@ -364,6 +364,78 @@ func TestDurableStateStorePruningWholeSecondBoundary(t *testing.T) {
 	}
 }
 
+func TestDurableStateStorePruningPreservesFirstConflictTime(t *testing.T) {
+	s, config := newDurableStoreFixture(t, 3)
+	issued := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	firstConflict := issued.Add(time.Hour)
+	cutoff := firstConflict.Add(time.Hour)
+	repeated := cutoff.Add(time.Hour)
+	s.durable.now = func() time.Time { return issued }
+	owner := durableFixtureOwner()
+	other := owner
+	other.identity[0]++
+	old := stateBindingToken{stateBindingTypeResponseID, "old-conflict"}
+	late := stateBindingToken{stateBindingTypeResponseID, "late-conflict"}
+	newToken := stateBindingToken{stateBindingTypeResponseID, "uncommitted-batch-member"}
+	retained := stateBindingToken{stateBindingTypeResponseID, "retained-proof"}
+	if r := s.bindAll([]stateBindingToken{old, late}, owner); r.err != nil || r.outcome != stateBindingLookupKnown {
+		t.Fatalf("initial proof = %+v", r)
+	}
+	s.durable.now = func() time.Time { return firstConflict }
+	if r := s.bindAll([]stateBindingToken{old}, other); r.err != nil || r.outcome != stateBindingLookupConflict {
+		t.Fatalf("first conflict = %+v", r)
+	}
+	closeDurableStoreFixture(t, s)
+	reopened, err := newDurableStateBindingStore(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeDurableStoreFixture(t, reopened)
+	reopened.durable.now = func() time.Time { return repeated }
+	for _, candidate := range []stateBindingOwner{owner, other} {
+		if r := reopened.bindAll([]stateBindingToken{old}, candidate); r.err != nil || r.outcome != stateBindingLookupConflict {
+			t.Fatalf("repeated conflict = %+v", r)
+		}
+	}
+	// A mixed batch must preserve the old tombstone, timestamp a newly detected
+	// collision now, and withhold the previously unknown member atomically.
+	if r := reopened.bindAll([]stateBindingToken{old, late, newToken}, other); r.err != nil || r.outcome != stateBindingLookupConflict {
+		t.Fatalf("mixed collision batch = %+v", r)
+	}
+	if r := reopened.lookup(newToken.stateType, newToken.value); r.err != nil || r.outcome != stateBindingLookupUnknown {
+		t.Fatalf("conflicting batch admitted new state: %+v", r)
+	}
+	if r := reopened.bindAll([]stateBindingToken{retained}, owner); r.err != nil || r.outcome != stateBindingLookupKnown {
+		t.Fatalf("retained proof = %+v", r)
+	}
+	if stats := reopened.stats(); stats.entries != 3 || stats.tombstones != 2 {
+		t.Fatalf("before pruning: %+v", stats)
+	}
+	if r := reopened.bindAll([]stateBindingToken{newToken}, owner); !errors.Is(r.err, errDurableStateCapacity) {
+		t.Fatalf("capacity before pruning = %+v", r)
+	}
+	closeDurableStoreFixture(t, reopened)
+	if n, err := PruneDurableStateBindings(config.Path, cutoff); err != nil || n != 1 {
+		t.Fatalf("pruning first conflict time: removed=%d err=%v", n, err)
+	}
+	pruned, err := newDurableStateBindingStore(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeDurableStoreFixture(t, pruned)
+	for token, want := range map[stateBindingToken]stateBindingLookupOutcome{
+		old: stateBindingLookupUnknown, late: stateBindingLookupConflict,
+		retained: stateBindingLookupKnown, newToken: stateBindingLookupUnknown,
+	} {
+		if r := pruned.lookup(token.stateType, token.value); r.err != nil || r.outcome != want {
+			t.Fatalf("pruned lookup %s = %+v, want %v", token.value, r, want)
+		}
+	}
+	if r := pruned.bindAll([]stateBindingToken{newToken}, owner); r.err != nil || r.outcome != stateBindingLookupKnown {
+		t.Fatalf("pruning did not reclaim capacity: %+v", r)
+	}
+}
+
 func TestDurableStateStoreInvalidFilesPreserved(t *testing.T) {
 	for _, damage := range []string{"empty", "truncated", "random", "foreign"} {
 		t.Run(damage, func(t *testing.T) {

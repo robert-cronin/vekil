@@ -406,6 +406,7 @@ func (d *durableStateBindings) bind(tokens []stateBindingToken, owner stateBindi
 		records := tx.Bucket(durableStateRecords)
 		newKeys := 0
 		conflicts := make([][]byte, 0)
+		hasConflict := false
 		for _, key := range keys {
 			value := records.Get(key)
 			if value == nil {
@@ -422,11 +423,18 @@ func (d *durableStateBindings) bind(tokens []stateBindingToken, owner stateBindi
 				result = prior
 				return nil
 			}
-			if prior.outcome == stateBindingLookupConflict || prior.owner != owner {
+			if prior.outcome == stateBindingLookupConflict {
+				// Keep the first conflict time for offline pruning. Reobserving
+				// a tombstone cannot restore authority or refresh its age.
+				hasConflict = true
+				continue
+			}
+			if prior.owner != owner {
+				hasConflict = true
 				conflicts = append(conflicts, key)
 			}
 		}
-		if len(conflicts) > 0 {
+		if hasConflict {
 			for _, key := range conflicts {
 				if err := records.Put(key, d.encode(key, stateBindingOwner{}, stateBindingLookupConflict, d.now())); err != nil {
 					return err
